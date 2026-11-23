@@ -307,16 +307,30 @@ def apply_patch(patch_text: str, workdir: str = "/workspace") -> str:
                 summary.append(f"M {op.rel}")
 
     # Validate destinations before any disk mutation.
-    for path, content in staged.items():
-        if content is not None and path.is_dir():
+    deletes = {path for path, content in staged.items() if content is None}
+    writes = {path: content for path, content in staged.items() if content is not None}
+    blocking_deletes: set[Path] = set()
+    for path in writes:
+        if path.is_dir():
             raise PatchError(f"Cannot overwrite directory with file: {path}")
+        for parent in path.parents:
+            if parent == base or base not in parent.parents:
+                break
+            if parent.is_file():
+                if parent in deletes:
+                    blocking_deletes.add(parent)
+                else:
+                    raise PatchError(f"Cannot create directory over existing file: {parent}")
 
-    # Write all created/updated files before unlinking deleted/moved sources.
-    for path, content in staged.items():
-        if content is not None:
-            _write_exact(path, content)
-    for path, content in staged.items():
-        if content is None and path.exists():
+    # Unlink only deleted files that block a new child directory, then write all
+    # created/updated files, then unlink remaining deleted/moved sources.
+    for path in blocking_deletes:
+        if path.exists():
+            path.unlink()
+    for path, content in writes.items():
+        _write_exact(path, content)
+    for path in deletes - blocking_deletes:
+        if path.exists():
             path.unlink()
 
     if not summary:

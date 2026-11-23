@@ -200,6 +200,20 @@ def test_apply_patch_hard_linked_files_preserve_both_edits(tmp_path: Path) -> No
     assert b.read_text() == "edited-b\n"
 
 
+def test_apply_patch_replace_file_with_directory_child(tmp_path: Path) -> None:
+    mod = tmp_path / "mod"
+    mod.write_text("old\n")
+    patch = (
+        "*** Begin Patch\n"
+        "*** Delete File: mod\n"
+        "*** Add File: mod/index.py\n"
+        "+new\n"
+        "*** End Patch"
+    )
+    apply_patch(patch, workdir=str(tmp_path))
+    assert (tmp_path / "mod" / "index.py").read_text() == "new\n"
+
+
 def test_sanitize_gemini_schema_strips_forbidden_keys() -> None:
     raw = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
