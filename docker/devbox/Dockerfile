@@ -1,9 +1,13 @@
 FROM ubuntu:24.04
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ARG TARGETARCH
 ARG MEKUGI_VERSION=v0.7.0
 ARG MEKUGI_REPO=yusing/mekugi
 ARG CODEX_REPO=yusing/codex
+ARG DOTFILES_SETUP_URL=https://raw.githubusercontent.com/yusing/agentic-dotfiles/main/setup.sh
+ARG DOTFILES_TOOLS=agent,go,rust,browser
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -15,19 +19,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CODE_MODE_DOCS_PATH=/usr/local/share/mekugi/code-mode-docs.json
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash \
-    build-essential \
     ca-certificates \
     curl \
-    fd-find \
-    git \
-    jq \
-    openssh-client \
-    procps \
-    python3 \
-    python3-pip \
     python3-venv \
-    ripgrep \
+    sudo \
+    && echo 'ubuntu ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/ubuntu \
+    && chmod 0440 /etc/sudoers.d/ubuntu \
+    && mkdir -p /workspace \
+    && chown ubuntu:ubuntu /workspace \
     && rm -rf /var/lib/apt/lists/*
 
 # Pull prebuilt codex-code-mode-host and its SOURCE_REVISION from Mekugi GitHub Release.
@@ -39,18 +38,31 @@ RUN set -eu; \
     chmod +x /usr/local/bin/codex-code-mode-host; \
     /usr/local/bin/codex-code-mode-host --help >/dev/null
 
+# Bootstrap user environment and Linuxbrew as non-root user ubuntu.
+USER ubuntu
+ENV HOME=/home/ubuntu \
+    AGENT_BROWSER_ENGINE=chrome \
+    PATH="/home/ubuntu/.local/bin:/home/ubuntu/.local/share/mise/shims:/home/ubuntu/go/bin:/home/ubuntu/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
+WORKDIR /home/ubuntu
+
+RUN --mount=type=secret,id=GITHUB_TOKEN \
+    if [ -s /run/secrets/GITHUB_TOKEN ]; then export GITHUB_TOKEN="$(cat /run/secrets/GITHUB_TOKEN)"; fi \
+    && curl -fsSL "${DOTFILES_SETUP_URL}" | bash -s -- --tools="${DOTFILES_TOOLS}" \
+    && sudo rm -rf /var/lib/apt/lists/*
+
+USER root
 WORKDIR /opt/mekugi-mcp
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-RUN python3 -m venv /opt/mekugi-mcp/.venv \
+RUN /usr/bin/python3 -m venv /opt/mekugi-mcp/.venv \
     && /opt/mekugi-mcp/.venv/bin/pip install --no-cache-dir . \
     && /opt/mekugi-mcp/.venv/bin/python -m mekugi_mcp.code_mode_docs \
         --repo "${CODEX_REPO}" \
         --ref-file /usr/local/share/mekugi/SOURCE_REVISION \
         --output /usr/local/share/mekugi/code-mode-docs.json
 
-RUN mkdir -p /workspace
+USER ubuntu
 WORKDIR /workspace
 
 EXPOSE 8080
