@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mekugi-mcp"
+version = "0.1.0"
+description = "FastMCP server exposing Mekugi's functions.exec in a Docker devbox for Gemini Web"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=44.0.0",
+    "fastmcp>=2.13.0",
+    "grpcio>=1.68.0",
+    "httpx>=0.28.0",
+    "protobuf>=5.29.0",
+    "pydantic>=2.10.0",
+    "starlette>=0.45.0",
+    "uvicorn>=0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "grpcio-tools>=1.68.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "ruff>=0.9.0",
+]
+
+[project.scripts]
+mekugi-mcp = "mekugi_mcp.server:main"
+mekugi-devbox = "mekugi_mcp.devbox_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = ["src/mekugi_mcp/proto/*_pb2*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "PIE"]
+ignore = ["E501"]
