@@ -116,11 +116,21 @@ async def test_fastmcp_to_devbox_full_stack(tmp_path: Path) -> None:
     grpc_port = _free_port()
     http_port = _free_port()
 
+    docs_file = tmp_path / "code-mode-docs.json"
+    docs_file.write_text(
+        '{"source_repo":"yusing/codex","source_ref":"test-rev",'
+        '"exec_description_template":"Mekugi canonical exec ({{ default_exec_yield_time_ms }}ms) {{ image_helper }}",'
+        '"wait_description_template":"Mekugi canonical wait",'
+        '"image_helper_description":"img-helper"}',
+        encoding="utf-8",
+    )
+
     app = create_devbox_app(
         grpc_target=f"127.0.0.1:{grpc_port}",
         host_binary=HOST_BIN,
         workdir=str(tmp_path),
         internal_token="secret-internal-token",
+        docs_path=str(docs_file),
     )
     config = uvicorn.Config(app, host="127.0.0.1", port=http_port, log_level="warning")
     server = uvicorn.Server(config)
@@ -136,13 +146,19 @@ async def test_fastmcp_to_devbox_full_stack(tmp_path: Path) -> None:
         async with httpx.AsyncClient() as http:
             denied = await http.post(f"http://127.0.0.1:{http_port}/exec", json={"code": "text('x');"})
             assert denied.status_code == 401
+            denied_docs = await http.get(f"http://127.0.0.1:{http_port}/code-mode-docs")
+            assert denied_docs.status_code == 401
 
-        mcp = create_mcp_server(
+        mcp = await asyncio.to_thread(
+            create_mcp_server,
             devbox_url=f"http://127.0.0.1:{http_port}",
             devbox_token="secret-internal-token",
             use_env_auth=False,
         )
         async with Client(mcp) as client:
+            tools = {t.name: t for t in await client.list_tools()}
+            assert "Mekugi canonical exec (10000ms) img-helper" in (tools["exec"].description or "")
+            assert "Mekugi canonical wait" in (tools["wait"].description or "")
             result = await client.call_tool(
                 "exec",
                 {

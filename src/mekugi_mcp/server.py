@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Annotated
+from collections.abc import Sequence
+from typing import Annotated, Any
 
 import httpx
 import uvicorn
 from fastmcp import FastMCP
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools.base import Tool
 from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -19,8 +22,11 @@ from mekugi_mcp.auth import (
     parse_allowed_emails,
 )
 from mekugi_mcp.code_mode_client import DEFAULT_CELL_YIELD_TIME_MS, MAX_CELL_YIELD_TIME_MS
+from mekugi_mcp.code_mode_docs import (
+    fetch_devbox_tool_descriptions,
+    resolve_mcp_tool_descriptions,
+)
 from mekugi_mcp.schema_sanitizer import GeminiSchemaSanitizerMiddleware
-from mekugi_mcp.tool_catalog import EXEC_TOOL_DESCRIPTION, WAIT_TOOL_DESCRIPTION
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +44,7 @@ def create_mcp_server(
     allowed_emails: frozenset[str] | None = None,
     allow_all_users: bool | None = None,
     no_confirmation_gate: bool | None = None,
+    docs_path: str | None = None,
 ) -> FastMCP:
     resolved_devbox_url = (devbox_url or os.environ.get("DEVBOX_URL", "http://devbox:8080")).rstrip("/")
     resolved_devbox_token = (
@@ -80,11 +87,50 @@ def create_mcp_server(
         }
     )
 
+    static_docs_path = docs_path or os.environ.get("CODE_MODE_DOCS_PATH", "").strip() or None
+    exec_description, wait_description, docs_source_ref = resolve_mcp_tool_descriptions(
+        docs_path=static_docs_path,
+        devbox_url=resolved_devbox_url,
+        devbox_headers=devbox_headers,
+        default_exec_yield_time_ms=DEFAULT_CELL_YIELD_TIME_MS,
+    )
+    docs_state: dict[str, str | None] = {
+        "exec": exec_description,
+        "wait": wait_description,
+        "ref": docs_source_ref,
+    }
+
+    class _LiveCodeModeDocsMiddleware(Middleware):
+        """Refreshes exec/wait descriptions from devbox on tools/list after recovery or upgrade."""
+
+        async def on_list_tools(
+            self,
+            context: MiddlewareContext[Any],
+            call_next: CallNext[Any, Sequence[Tool]],
+        ) -> Sequence[Tool]:
+            if static_docs_path is None:
+                refreshed = await fetch_devbox_tool_descriptions(
+                    devbox_url=resolved_devbox_url,
+                    devbox_headers=devbox_headers,
+                    default_exec_yield_time_ms=DEFAULT_CELL_YIELD_TIME_MS,
+                )
+                if refreshed is not None:
+                    docs_state["exec"], docs_state["wait"], docs_state["ref"] = refreshed
+            tools = await call_next(context)
+            updated: list[Tool] = []
+            for tool in tools:
+                if tool.name == "exec" and docs_state["exec"]:
+                    tool = tool.model_copy(update={"description": docs_state["exec"]})
+                elif tool.name == "wait" and docs_state["wait"]:
+                    tool = tool.model_copy(update={"description": docs_state["wait"]})
+                updated.append(tool)
+            return updated
+
     mcp = FastMCP(
         name="mekugi-devbox",
         instructions=SERVER_INSTRUCTIONS,
         auth=resolved_auth,  # type: ignore[arg-type]
-        middleware=[GeminiSchemaSanitizerMiddleware()],
+        middleware=[_LiveCodeModeDocsMiddleware(), GeminiSchemaSanitizerMiddleware()],
     )
 
     @mcp.custom_route("/health", methods=["GET"])
@@ -93,13 +139,19 @@ def create_mcp_server(
             async with httpx.AsyncClient(timeout=5.0) as http:
                 resp = await http.get(f"{resolved_devbox_url}/health")
                 resp.raise_for_status()
-                return JSONResponse({"status": "ok", "devbox": resp.json()})
+                return JSONResponse(
+                    {
+                        "status": "ok",
+                        "code_mode_docs_ref": docs_state["ref"],
+                        "devbox": resp.json(),
+                    }
+                )
         except Exception as exc:
             return JSONResponse({"status": "degraded", "error": str(exc)}, status_code=503)
 
     @mcp.tool(
         name="exec",
-        description=EXEC_TOOL_DESCRIPTION,
+        description=exec_description,
         annotations=tool_annotations,
         output_schema=None,
     )
@@ -151,7 +203,7 @@ def create_mcp_server(
 
     @mcp.tool(
         name="wait",
-        description=WAIT_TOOL_DESCRIPTION,
+        description=wait_description,
         annotations=tool_annotations,
         output_schema=None,
     )
