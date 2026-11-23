@@ -7,3 +7,9 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - type: bind
+        source: ${HOME}/.skills-mgr/skills/plane
+        target: /home/ubuntu/.agents/skills/plane
+        read_only: true
+        bind:
+          create_host_path: false

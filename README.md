@@ -45,8 +45,10 @@ curl -fsS https://<your-domain>/health
 ```
 
 To use Plane in the devbox, install a container-compatible `plane` binary at
-`~/.local/bin/plane` on the Docker host. Add the Compose override to mount it
-read-only without including it in the image:
+`~/.local/bin/plane` and the full skill at
+`~/.skills-mgr/skills/plane/SKILL.md` on the Docker host. Add the Compose override
+to mount both read-only without including them in the image. The skill is
+available inside the devbox at `~/.agents/skills/plane/SKILL.md`:
 
 ```bash
 docker compose -f docker-compose.yml -f docker/devbox/compose.plane.yml \
