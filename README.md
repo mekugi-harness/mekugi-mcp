@@ -44,6 +44,15 @@ Verify health:
 curl -fsS https://<your-domain>/health
 ```
 
+To use Plane in the devbox, install a container-compatible `plane` binary at
+`~/.local/bin/plane` on the Docker host. Add the Compose override to mount it
+read-only without including it in the image:
+
+```bash
+docker compose -f docker-compose.yml -f docker/devbox/compose.plane.yml \
+  up -d --build
+```
+
 ### 4. Connect in Gemini Web
 1. Open `gemini.google.com` → **Settings → Connected Apps → Custom apps**.
 2. Add your MCP endpoint:

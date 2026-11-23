@@ -1,0 +1,9 @@
+services:
+  devbox:
+    volumes:
+      - type: bind
+        source: ${HOME}/.local/bin/plane
+        target: /home/ubuntu/.local/bin/plane
+        read_only: true
+        bind:
+          create_host_path: false
