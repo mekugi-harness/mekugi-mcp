@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -246,8 +249,17 @@ def _read_exact(path: Path) -> str:
 
 def _write_exact(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as f:
-        f.write(content)
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
+    fd, tmp_name = tempfile.mkstemp(prefix=".mekugi-patch-", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def apply_patch(patch_text: str, workdir: str = "/workspace") -> str:
@@ -259,10 +271,15 @@ def apply_patch(patch_text: str, workdir: str = "/workspace") -> str:
     staged: dict[Path, str | None] = {}
     summary: list[str] = []
 
+    def _exists(path: Path) -> bool:
+        if path in staged:
+            return staged[path] is not None
+        return path.is_file()
+
     def _current_content(path: Path) -> str | None:
         if path in staged:
             return staged[path]
-        if path.exists():
+        if path.is_file():
             return _read_exact(path)
         return None
 
@@ -271,7 +288,7 @@ def apply_patch(patch_text: str, workdir: str = "/workspace") -> str:
             staged[op.target] = op.content
             summary.append(f"A {op.rel}")
         elif isinstance(op, _DeleteOp):
-            if _current_content(op.target) is None:
+            if not _exists(op.target):
                 raise PatchError(f"Cannot delete missing file: {op.rel}")
             staged[op.target] = None
             summary.append(f"D {op.rel}")
@@ -289,12 +306,18 @@ def apply_patch(patch_text: str, workdir: str = "/workspace") -> str:
                 staged[op.source] = updated
                 summary.append(f"M {op.rel}")
 
+    # Validate destinations before any disk mutation.
     for path, content in staged.items():
-        if content is None:
-            if path.exists():
-                path.unlink()
-        else:
+        if content is not None and path.is_dir():
+            raise PatchError(f"Cannot overwrite directory with file: {path}")
+
+    # Write all created/updated files before unlinking deleted/moved sources.
+    for path, content in staged.items():
+        if content is not None:
             _write_exact(path, content)
+    for path, content in staged.items():
+        if content is None and path.exists():
+            path.unlink()
 
     if not summary:
         return "Success. No files changed."

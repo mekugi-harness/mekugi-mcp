@@ -148,6 +148,58 @@ def test_apply_patch_preserves_crlf(tmp_path: Path) -> None:
     assert target.read_bytes() == b"one\r\nTWO\r\nthree\r\n"
 
 
+def test_apply_patch_failed_rename_to_dir_preserves_source(tmp_path: Path) -> None:
+    src = tmp_path / "src.txt"
+    src.write_text("hello\n")
+    (tmp_path / "dest_dir").mkdir()
+    patch = (
+        "*** Begin Patch\n"
+        "*** Update File: src.txt\n"
+        "@@\n"
+        "-hello\n"
+        "+world\n"
+        "*** Update File: src.txt\n"
+        "*** Move to: dest_dir\n"
+        "*** End Patch"
+    )
+    with pytest.raises(PatchError, match="directory"):
+        apply_patch(patch, workdir=str(tmp_path))
+    assert src.exists()
+    assert src.read_text() == "hello\n"
+
+
+def test_apply_patch_deletes_binary_file(tmp_path: Path) -> None:
+    img = tmp_path / "pixel.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe\x00\x01")
+    apply_patch(
+        "*** Begin Patch\n*** Delete File: pixel.png\n*** End Patch",
+        workdir=str(tmp_path),
+    )
+    assert not img.exists()
+
+
+def test_apply_patch_hard_linked_files_preserve_both_edits(tmp_path: Path) -> None:
+    a = tmp_path / "a.txt"
+    b = tmp_path / "b.txt"
+    a.write_text("shared\n")
+    os.link(a, b)
+    patch = (
+        "*** Begin Patch\n"
+        "*** Update File: a.txt\n"
+        "@@\n"
+        "-shared\n"
+        "+edited-a\n"
+        "*** Update File: b.txt\n"
+        "@@\n"
+        "-shared\n"
+        "+edited-b\n"
+        "*** End Patch"
+    )
+    apply_patch(patch, workdir=str(tmp_path))
+    assert a.read_text() == "edited-a\n"
+    assert b.read_text() == "edited-b\n"
+
+
 def test_sanitize_gemini_schema_strips_forbidden_keys() -> None:
     raw = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
