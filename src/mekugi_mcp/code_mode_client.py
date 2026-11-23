@@ -143,6 +143,7 @@ class CodeModeHostClient:
         self._inflight_calls: dict[str, asyncio.Task[None]] = {}
         self._session_lock = asyncio.Lock()
         self._catalog_installed = False
+        self._supports_catalog_revision = False
 
     @property
     def session_id(self) -> str | None:
@@ -188,6 +189,9 @@ class CodeModeHostClient:
                     if kind == "opened":
                         self._session_id = event.opened.session_id
                         self._catalog_installed = False
+                        self._supports_catalog_revision = bool(
+                            event.opened.supports_catalog_revision
+                        )
                         opened_event.set()
                     elif kind == "tool_call_cancelled":
                         inv_id = event.tool_call_cancelled.invocation_id
@@ -358,16 +362,19 @@ class CodeModeHostClient:
             execution_id = f"exec-{uuid.uuid4().hex[:12]}"
             tool_call_id = f"call-{uuid.uuid4().hex[:12]}"
 
-            request = pb.ExecuteRequest(
-                session_id=session_id,
-                execution_id=execution_id,
-                tool_call_id=tool_call_id,
-                source=parsed.code,
-                enabled_tools=self._nested_tools if not self._catalog_installed else [],
-                yield_time_ms=effective_yield_ms,
-                max_output_tokens=effective_max_tokens,
-                catalog_revision=1,
-            )
+            reuse_catalog = self._supports_catalog_revision and self._catalog_installed
+            request_kwargs: dict[str, Any] = {
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "tool_call_id": tool_call_id,
+                "source": parsed.code,
+                "enabled_tools": [] if reuse_catalog else self._nested_tools,
+                "yield_time_ms": effective_yield_ms,
+                "max_output_tokens": effective_max_tokens,
+            }
+            if self._supports_catalog_revision:
+                request_kwargs["catalog_revision"] = 1
+            request = pb.ExecuteRequest(**request_kwargs)
 
             try:
                 outcome: pb.ExecutionOutcome | None = None

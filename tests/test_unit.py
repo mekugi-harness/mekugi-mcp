@@ -6,6 +6,7 @@ import asyncio
 import os
 from pathlib import Path
 
+import httpx
 import pytest
 from fastmcp import Client
 
@@ -294,6 +295,46 @@ def test_google_auth_provider_construction(tmp_path: Path, monkeypatch: pytest.M
     with pytest.raises(PermissionError, match="ALLOWED_EMAILS"):
         enforce_allowed_email(frozenset(), auth_enabled=True)
     assert os.environ["BASE_URL"] == "https://mcp.example.com"
+
+
+@pytest.mark.asyncio
+async def test_mcp_http_oauth_discovery_protection_and_callback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AUTH_DISABLED", raising=False)
+    monkeypatch.delenv("ALLOW_ALL_GOOGLE_USERS", raising=False)
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-id.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "test-secret")
+    monkeypatch.setenv("BASE_URL", "https://mcp.example.com")
+    monkeypatch.setenv("JWT_SIGNING_KEY", "super-secret-signing-key-32-bytes")
+    monkeypatch.setenv("ALLOWED_EMAILS", "alice@example.com")
+    monkeypatch.setenv("OAUTH_STORAGE_DIR", str(tmp_path / "oauth"))
+
+    mcp = create_mcp_server(devbox_url="http://127.0.0.1:9", use_env_auth=True)
+    app = mcp.http_app(path="/mcp")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="https://mcp.example.com",
+        ) as client,
+    ):
+        health = await client.get("/health")
+        assert health.status_code == 503
+        assert health.json()["status"] == "degraded"
+
+        discovery = await client.get("/.well-known/oauth-authorization-server")
+        assert discovery.status_code == 200
+        meta = discovery.json()
+        assert meta["issuer"].rstrip("/") == "https://mcp.example.com"
+        assert "authorization_endpoint" in meta
+        assert "token_endpoint" in meta
+
+        unauth_mcp = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        assert unauth_mcp.status_code == 401
+
+        callback = await client.get("/auth/callback")
+        assert callback.status_code != 404
 
 
 @pytest.mark.asyncio
