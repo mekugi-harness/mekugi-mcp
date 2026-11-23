@@ -1,0 +1,60 @@
+services:
+  devbox:
+    build:
+      context: .
+      dockerfile: docker/devbox/Dockerfile
+      args:
+        MEKUGI_VERSION: ${MEKUGI_VERSION:-v0.7.0}
+    restart: unless-stopped
+    environment:
+      DEVBOX_WORKDIR: /workspace
+      DEVBOX_SHELL: /bin/bash
+      MAX_CELL_YIELD_TIME_MS: ${MAX_CELL_YIELD_TIME_MS:-45000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - workspace:/workspace
+    networks:
+      - mekugi-net
+
+  mcp:
+    build:
+      context: .
+      dockerfile: docker/mcp/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      devbox:
+        condition: service_healthy
+    environment:
+      DEVBOX_URL: http://devbox:8080
+      BASE_URL: ${BASE_URL:?Set BASE_URL to your public HTTPS tunnel URL (e.g. https://mcp.example.com)}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?Set GOOGLE_CLIENT_ID from Google Cloud Console}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?Set GOOGLE_CLIENT_SECRET from Google Cloud Console}
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?Set JWT_SIGNING_KEY (random 32+ char secret)}
+      STORAGE_ENCRYPTION_KEY: ${STORAGE_ENCRYPTION_KEY:-}
+      ALLOWED_EMAILS: ${ALLOWED_EMAILS:-}
+      OAUTH_REQUIRE_CONSENT: ${OAUTH_REQUIRE_CONSENT:-remember}
+      NO_CONFIRMATION_GATE: ${NO_CONFIRMATION_GATE:-true}
+      OAUTH_STORAGE_DIR: /data/oauth
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - oauth_data:/data/oauth
+    networks:
+      - mekugi-net
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on:
+      mcp:
+        condition: service_healthy
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - mekugi-net
+
+volumes:
+  workspace:
+  oauth_data:
+
+networks:
+  mekugi-net:
+    driver: bridge
