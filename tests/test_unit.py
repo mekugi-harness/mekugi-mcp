@@ -6,13 +6,16 @@ import asyncio
 import os
 from pathlib import Path
 
+import httpx
 import pytest
 from fastmcp import Client
 
 from mekugi_mcp import pty_manager
 from mekugi_mcp.apply_patch import PatchError, apply_patch
 from mekugi_mcp.auth import build_google_auth_provider, enforce_allowed_email, parse_allowed_emails
+from mekugi_mcp.code_mode_client import CodeModeHostClient
 from mekugi_mcp.pragma import parse_exec_source
+from mekugi_mcp.proto import code_mode_v1_pb2 as pb
 from mekugi_mcp.pty_manager import ProcessManager
 from mekugi_mcp.schema_sanitizer import FORBIDDEN_SCHEMA_KEYS, sanitize_gemini_schema
 from mekugi_mcp.server import create_mcp_server
@@ -294,6 +297,105 @@ def test_google_auth_provider_construction(tmp_path: Path, monkeypatch: pytest.M
     with pytest.raises(PermissionError, match="ALLOWED_EMAILS"):
         enforce_allowed_email(frozenset(), auth_enabled=True)
     assert os.environ["BASE_URL"] == "https://mcp.example.com"
+
+
+@pytest.mark.asyncio
+async def test_mcp_http_oauth_discovery_protection_and_callback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AUTH_DISABLED", raising=False)
+    monkeypatch.delenv("ALLOW_ALL_GOOGLE_USERS", raising=False)
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-id.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "test-secret")
+    monkeypatch.setenv("BASE_URL", "https://mcp.example.com")
+    monkeypatch.setenv("JWT_SIGNING_KEY", "super-secret-signing-key-32-bytes")
+    monkeypatch.setenv("ALLOWED_EMAILS", "alice@example.com")
+    monkeypatch.setenv("OAUTH_STORAGE_DIR", str(tmp_path / "oauth"))
+
+    mcp = create_mcp_server(devbox_url="http://127.0.0.1:9", use_env_auth=True)
+    app = mcp.http_app(path="/mcp")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="https://mcp.example.com",
+        ) as client,
+    ):
+        health = await client.get("/health")
+        assert health.status_code == 503
+        assert health.json()["status"] == "degraded"
+
+        discovery = await client.get("/.well-known/oauth-authorization-server")
+        assert discovery.status_code == 200
+        meta = discovery.json()
+        assert meta["issuer"].rstrip("/") == "https://mcp.example.com"
+        assert "authorization_endpoint" in meta
+        assert "token_endpoint" in meta
+
+        unauth_mcp = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        assert unauth_mcp.status_code == 401
+
+        callback = await client.get("/auth/callback")
+        assert callback.status_code == 400
+        assert "missing" in callback.text.lower() or "code" in callback.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_code_mode_client_catalog_negotiation_and_reconnect(tmp_path: Path) -> None:
+    class _FakeStub:
+        def __init__(self) -> None:
+            self.requests: list[pb.ExecuteRequest] = []
+
+        async def Execute(self, request: pb.ExecuteRequest):  # noqa: N802
+            self.requests.append(request)
+            yield pb.ExecuteEvent(started=pb.ExecutionStarted(cell_id="cell-1"))
+            yield pb.ExecuteEvent(
+                outcome=pb.ExecutionOutcome(
+                    cell_id="cell-1",
+                    completed=pb.ExecutionCompleted(),
+                )
+            )
+
+    # 1. Legacy host without supports_catalog_revision always receives full enabled_tools
+    legacy_client = CodeModeHostClient(target="127.0.0.1:1", workdir=str(tmp_path))
+    legacy_stub = _FakeStub()
+    legacy_client._stub = legacy_stub  # type: ignore[assignment]
+    legacy_client._session_id = "sess-legacy"
+    legacy_client._supports_catalog_revision = False
+
+    await legacy_client.execute('text("1");')
+    await legacy_client.execute('text("2");')
+    assert len(legacy_stub.requests) == 2
+    assert len(legacy_stub.requests[0].enabled_tools) > 0
+    assert len(legacy_stub.requests[1].enabled_tools) > 0
+    assert legacy_stub.requests[0].catalog_revision == 0
+    assert legacy_stub.requests[1].catalog_revision == 0
+
+    # 2. Modern host with supports_catalog_revision omits tools on reuse, resends after reconnect
+    modern_client = CodeModeHostClient(target="127.0.0.1:1", workdir=str(tmp_path))
+    modern_stub = _FakeStub()
+    modern_client._stub = modern_stub  # type: ignore[assignment]
+    modern_client._session_id = "sess-1"
+    modern_client._supports_catalog_revision = True
+
+    await modern_client.execute('text("1");')
+    await modern_client.execute('text("2");')
+    assert len(modern_stub.requests[0].enabled_tools) > 0
+    assert len(modern_stub.requests[1].enabled_tools) == 0
+    assert modern_stub.requests[0].catalog_revision == 1
+    assert modern_stub.requests[1].catalog_revision == 1
+
+    # Simulate reconnect opening a fresh session
+    async def _fake_start() -> None:
+        modern_client._session_id = "sess-2"
+        modern_client._catalog_installed = False
+        modern_client._supports_catalog_revision = True
+
+    modern_client._session_id = None
+    modern_client.start = _fake_start  # type: ignore[method-assign]
+    await modern_client.execute('text("3");')
+    assert len(modern_stub.requests[2].enabled_tools) > 0
+    assert modern_stub.requests[2].session_id == "sess-2"
 
 
 @pytest.mark.asyncio

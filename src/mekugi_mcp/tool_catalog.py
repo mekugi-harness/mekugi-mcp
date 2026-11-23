@@ -108,4 +108,4 @@ EXEC_TOOL_DESCRIPTION = """Run JavaScript code in Mekugi's V8 code-mode isolate 
 WAIT_TOOL_DESCRIPTION = """Wait on a running `exec` cell, read its next output page, or terminate it.
 - Pass `cell_id` from a previous `exec` or `wait` response.
 - Set `terminate: true` to stop the running cell.
-- For a running shell `session_id` inside a completed cell, poll `tools.write_stdin` inside `exec` instead."""
+- For a running shell `session_id` inside a completed cell, poll `tools.write_stdin` inside `exec` instead (unread output after process exit is retained for 10 minutes)."""
