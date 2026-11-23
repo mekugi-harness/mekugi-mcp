@@ -48,7 +48,11 @@ async def test_code_mode_host_direct_e2e(tmp_path: Path) -> None:
     grpc_port = _free_port()
     target = f"127.0.0.1:{grpc_port}"
     supervisor = HostSupervisor(HOST_BIN, target)
-    client = CodeModeHostClient(target=target, workdir=str(tmp_path))
+    client = CodeModeHostClient(
+        target=target,
+        workdir=str(tmp_path),
+        ensure_host_running=supervisor.ensure_running,
+    )
 
     await supervisor.start()
     try:
@@ -93,6 +97,14 @@ async def test_code_mode_host_direct_e2e(tmp_path: Path) -> None:
 
         res5 = await client.wait(res4.cell_id, terminate=True)
         assert res5.status == "terminated"
+
+        # 5. Host crash recovery: kill codex-code-mode-host and verify next execute restarts it
+        assert supervisor._proc is not None
+        supervisor._proc.kill()
+        await supervisor._proc.wait()
+        res6 = await client.execute('text("recovered");')
+        assert res6.status == "completed"
+        assert "recovered" in res6.text
     finally:
         await client.close()
         await supervisor.stop()

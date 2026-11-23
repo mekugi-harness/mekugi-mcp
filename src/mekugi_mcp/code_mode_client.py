@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -125,10 +126,12 @@ class CodeModeHostClient:
         workdir: str = "/workspace",
         default_shell: str = "/bin/bash",
         max_yield_time_ms: int = MAX_CELL_YIELD_TIME_MS,
+        ensure_host_running: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.target = target
         self.workdir = workdir
         self.max_yield_time_ms = max_yield_time_ms
+        self._ensure_host_running = ensure_host_running
         self.process_manager = ProcessManager(default_workdir=workdir, default_shell=default_shell)
         self._nested_tools = build_nested_tool_definitions()
 
@@ -154,6 +157,8 @@ class CodeModeHostClient:
 
     async def _open_session_locked(self) -> None:
         await self._close_streams_locked()
+        if self._ensure_host_running is not None:
+            await self._ensure_host_running()
 
         self._channel = grpc.aio.insecure_channel(
             self.target,
@@ -162,6 +167,7 @@ class CodeModeHostClient:
                 ("grpc.max_receive_message_length", 32 * 1024 * 1024),
             ],
         )
+        await asyncio.wait_for(self._channel.channel_ready(), timeout=10.0)
         self._stub = pb_grpc.CodeModeHostStub(self._channel)
 
         opened_event: asyncio.Event = asyncio.Event()
@@ -174,7 +180,8 @@ class CodeModeHostClient:
                     pb.OpenSessionRequest(
                         output_truncation=pb.OUTPUT_TRUNCATION_SERVER,
                         heartbeat_interval_s=15,
-                    )
+                    ),
+                    wait_for_ready=True,
                 )
                 async for event in stream:
                     kind = event.WhichOneof("event")

@@ -28,47 +28,61 @@ class HostSupervisor:
         self.binary_path = binary_path
         self.listen_addr = listen_addr
         self._proc: asyncio.subprocess.Process | None = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def is_running(self) -> bool:
+        if not self.binary_path:
+            return True
+        return self._proc is not None and self._proc.returncode is None
 
     async def start(self) -> None:
+        await self.ensure_running()
+
+    async def ensure_running(self) -> None:
         if not self.binary_path:
             return
-        if not Path(self.binary_path).exists():
-            raise FileNotFoundError(f"CODE_MODE_HOST_BIN not found: {self.binary_path}")
-
-        listen_url = f"grpc://{self.listen_addr}"
-        logger.info("Starting codex-code-mode-host: %s --listen %s", self.binary_path, listen_url)
-        self._proc = await asyncio.create_subprocess_exec(
-            self.binary_path,
-            "--listen",
-            listen_url,
-        )
-
-        host, port_str = self.listen_addr.rsplit(":", 1)
-        port = int(port_str)
-        for _ in range(100):
-            if self._proc.returncode is not None:
-                raise RuntimeError(
-                    f"codex-code-mode-host exited early with code {self._proc.returncode}"
-                )
-            try:
-                _, writer = await asyncio.open_connection(host, port)
-                writer.close()
-                await writer.wait_closed()
+        async with self._lock:
+            if self._proc is not None and self._proc.returncode is None:
                 return
-            except OSError:
-                await asyncio.sleep(0.1)
-        raise TimeoutError(f"codex-code-mode-host did not listen on {self.listen_addr} in time")
+            if not Path(self.binary_path).exists():
+                raise FileNotFoundError(f"CODE_MODE_HOST_BIN not found: {self.binary_path}")
+
+            listen_url = f"grpc://{self.listen_addr}"
+            logger.info("Starting codex-code-mode-host: %s --listen %s", self.binary_path, listen_url)
+            self._proc = await asyncio.create_subprocess_exec(
+                self.binary_path,
+                "--listen",
+                listen_url,
+            )
+
+            host, port_str = self.listen_addr.rsplit(":", 1)
+            port = int(port_str)
+            for _ in range(100):
+                if self._proc.returncode is not None:
+                    raise RuntimeError(
+                        f"codex-code-mode-host exited early with code {self._proc.returncode}"
+                    )
+                try:
+                    _, writer = await asyncio.open_connection(host, port)
+                    writer.close()
+                    await writer.wait_closed()
+                    return
+                except OSError:
+                    await asyncio.sleep(0.1)
+            raise TimeoutError(f"codex-code-mode-host did not listen on {self.listen_addr} in time")
 
     async def stop(self) -> None:
-        if self._proc is None or self._proc.returncode is not None:
-            return
-        self._proc.terminate()
-        try:
-            await asyncio.wait_for(self._proc.wait(), timeout=5.0)
-        except TimeoutError:
-            self._proc.kill()
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(self._proc.wait(), timeout=2.0)
+        async with self._lock:
+            if self._proc is None or self._proc.returncode is not None:
+                return
+            self._proc.terminate()
+            try:
+                await asyncio.wait_for(self._proc.wait(), timeout=5.0)
+            except TimeoutError:
+                self._proc.kill()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(self._proc.wait(), timeout=2.0)
 
 
 def create_devbox_app(
@@ -109,6 +123,7 @@ def create_devbox_app(
         workdir=cwd,
         default_shell=shell,
         max_yield_time_ms=max_yield,
+        ensure_host_running=supervisor.ensure_running,
     )
 
     @contextlib.asynccontextmanager
@@ -123,6 +138,15 @@ def create_devbox_app(
             await supervisor.stop()
 
     async def health(_request: Request) -> JSONResponse:
+        if not supervisor.is_running:
+            return JSONResponse(
+                {
+                    "status": "degraded",
+                    "error": "codex-code-mode-host is not running",
+                    "workdir": cwd,
+                },
+                status_code=503,
+            )
         return JSONResponse(
             {
                 "status": "ok",
