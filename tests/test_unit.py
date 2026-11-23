@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
 import pytest
 from fastmcp import Client
 
+from mekugi_mcp import pty_manager
 from mekugi_mcp.apply_patch import PatchError, apply_patch
 from mekugi_mcp.auth import build_google_auth_provider, enforce_allowed_email, parse_allowed_emails
 from mekugi_mcp.pragma import parse_exec_source
+from mekugi_mcp.pty_manager import ProcessManager
 from mekugi_mcp.schema_sanitizer import FORBIDDEN_SCHEMA_KEYS, sanitize_gemini_schema
 from mekugi_mcp.server import create_mcp_server
 
@@ -208,3 +211,40 @@ def test_google_auth_provider_construction(tmp_path: Path, monkeypatch: pytest.M
     with pytest.raises(PermissionError, match="ALLOWED_EMAILS"):
         enforce_allowed_email(frozenset(), auth_enabled=True)
     assert os.environ["BASE_URL"] == "https://mcp.example.com"
+
+
+@pytest.mark.asyncio
+async def test_pty_manager_cancelling_exec_command_terminates_process(tmp_path: Path) -> None:
+    mgr = ProcessManager(default_workdir=str(tmp_path))
+    task = asyncio.create_task(mgr.exec_command("sleep 30", yield_time_ms=10_000))
+    await asyncio.sleep(0.1)
+    assert len(mgr._sessions) == 1
+    proc = next(iter(mgr._sessions.values())).process
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(mgr._sessions) == 0
+    assert proc.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_pty_manager_reaps_unpolled_exited_pty_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pty_manager, "EXITED_SESSION_TTL_S", 0.05)
+    mgr = ProcessManager(default_workdir=str(tmp_path))
+    out = await mgr.exec_command("sleep 0.15; echo done", tty=True, yield_time_ms=20)
+    assert "Process running with session ID" in out
+    assert len(mgr._sessions) == 1
+    managed = next(iter(mgr._sessions.values()))
+
+    for _ in range(50):
+        if len(mgr._sessions) == 0:
+            break
+        await asyncio.sleep(0.05)
+
+    assert len(mgr._sessions) == 0
+    assert managed.master_fd is None
+    assert managed.closed is True

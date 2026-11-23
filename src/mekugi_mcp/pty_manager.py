@@ -17,6 +17,7 @@ MAX_SHELL_YIELD_TIME_MS = 40_000
 DEFAULT_MAX_OUTPUT_TOKENS = 10_000
 CHARS_PER_TOKEN = 4
 MAX_BUFFER_BYTES = 2 * 1024 * 1024
+EXITED_SESSION_TTL_S = 60.0
 
 
 def truncate_output(text: str, max_tokens: int) -> str:
@@ -40,6 +41,7 @@ class ManagedProcess:
     buffer: bytearray = field(default_factory=bytearray)
     data_event: asyncio.Event = field(default_factory=asyncio.Event)
     reader_task: asyncio.Task[None] | None = None
+    reaper_task: asyncio.Task[None] | None = None
     closed: bool = False
 
     def append_output(self, chunk: bytes) -> None:
@@ -84,10 +86,15 @@ class ManagedProcess:
             self.reader_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self.reader_task
+        if self.reaper_task is not None and not self.reaper_task.done():
+            self.reaper_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.reaper_task
         if self.master_fd is not None:
             with contextlib.suppress(OSError):
                 os.close(self.master_fd)
             self.master_fd = None
+        self.buffer.clear()
         self.closed = True
 
 
@@ -188,7 +195,12 @@ class ProcessManager:
         wait_ms = DEFAULT_YIELD_TIME_MS if yield_time_ms is None else max(0, min(int(yield_time_ms), MAX_SHELL_YIELD_TIME_MS))
         token_budget = DEFAULT_MAX_OUTPUT_TOKENS if max_output_tokens is None else max(100, int(max_output_tokens))
 
-        return await self._collect(managed, wait_ms=wait_ms, max_output_tokens=token_budget)
+        try:
+            return await self._collect(managed, wait_ms=wait_ms, max_output_tokens=token_budget)
+        except asyncio.CancelledError:
+            self._sessions.pop(session_id, None)
+            await managed.terminate()
+            raise
 
     async def write_stdin(
         self,
@@ -237,7 +249,24 @@ class ProcessManager:
         except Exception:
             pass
         finally:
+            if managed.master_fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(managed.master_fd)
+                managed.master_fd = None
             managed.data_event.set()
+            if managed.session_id in self._sessions and managed.reaper_task is None:
+                managed.reaper_task = asyncio.create_task(self._reap_exited(managed))
+
+    async def _reap_exited(self, managed: ManagedProcess) -> None:
+        try:
+            await managed.process.wait()
+            await asyncio.sleep(EXITED_SESSION_TTL_S)
+            if self._sessions.get(managed.session_id) is managed:
+                self._sessions.pop(managed.session_id, None)
+                managed.buffer.clear()
+                managed.closed = True
+        except asyncio.CancelledError:
+            raise
 
     async def _collect(
         self,
@@ -273,6 +302,8 @@ class ProcessManager:
         if managed.process.returncode is not None:
             exit_code = managed.process.returncode
             self._sessions.pop(managed.session_id, None)
+            if managed.reaper_task is not None and not managed.reaper_task.done():
+                managed.reaper_task.cancel()
             if managed.master_fd is not None:
                 with contextlib.suppress(OSError):
                     os.close(managed.master_fd)
