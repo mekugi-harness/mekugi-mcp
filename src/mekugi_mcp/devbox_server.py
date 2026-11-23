@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -77,12 +78,30 @@ def create_devbox_app(
     workdir: str | None = None,
     default_shell: str | None = None,
     max_yield_time_ms: int | None = None,
+    internal_token: str | None = None,
 ) -> Starlette:
     target = grpc_target or os.environ.get("CODE_MODE_HOST_TARGET", "127.0.0.1:50051")
     binary = host_binary if host_binary is not None else os.environ.get("CODE_MODE_HOST_BIN", "/usr/local/bin/codex-code-mode-host")
     cwd = workdir or os.environ.get("DEVBOX_WORKDIR", "/workspace")
     shell = default_shell or os.environ.get("DEVBOX_SHELL", "/bin/bash")
     max_yield = max_yield_time_ms or int(os.environ.get("MAX_CELL_YIELD_TIME_MS", str(MAX_CELL_YIELD_TIME_MS)))
+    expected_token = (
+        internal_token
+        if internal_token is not None
+        else os.environ.get("DEVBOX_INTERNAL_TOKEN", "").strip()
+    )
+
+    def _authorize(request: Request) -> JSONResponse | None:
+        if not expected_token:
+            return None
+        auth_header = request.headers.get("authorization", "")
+        prefix = "Bearer "
+        if not auth_header.startswith(prefix):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        provided = auth_header[len(prefix) :]
+        if not hmac.compare_digest(provided, expected_token):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        return None
 
     supervisor = HostSupervisor(binary or None, target)
     client = CodeModeHostClient(
@@ -113,6 +132,8 @@ def create_devbox_app(
         )
 
     async def handle_exec(request: Request) -> JSONResponse:
+        if (denied := _authorize(request)) is not None:
+            return denied
         try:
             body = await request.json()
             code = body.get("code")
@@ -131,6 +152,8 @@ def create_devbox_app(
             return JSONResponse({"error": str(exc)}, status_code=500)
 
     async def handle_wait(request: Request) -> JSONResponse:
+        if (denied := _authorize(request)) is not None:
+            return denied
         try:
             body = await request.json()
             cell_id = body.get("cell_id")

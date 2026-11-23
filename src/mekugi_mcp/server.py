@@ -32,22 +32,39 @@ Always pass values you want returned to `text(...)`. If a script yields with a `
 def create_mcp_server(
     *,
     devbox_url: str | None = None,
+    devbox_token: str | None = None,
     auth_provider: object | None = None,
     use_env_auth: bool = True,
     allowed_emails: frozenset[str] | None = None,
+    allow_all_users: bool | None = None,
     no_confirmation_gate: bool | None = None,
 ) -> FastMCP:
     resolved_devbox_url = (devbox_url or os.environ.get("DEVBOX_URL", "http://devbox:8080")).rstrip("/")
+    resolved_devbox_token = (
+        devbox_token
+        if devbox_token is not None
+        else os.environ.get("DEVBOX_INTERNAL_TOKEN", "").strip()
+    )
     resolved_auth = build_google_auth_provider() if (use_env_auth and auth_provider is None) else auth_provider
+    auth_enabled = resolved_auth is not None
     resolved_emails = (
         allowed_emails
         if allowed_emails is not None
         else parse_allowed_emails(os.environ.get("ALLOWED_EMAILS"))
     )
+    if allow_all_users is None:
+        allow_all_users = os.environ.get("ALLOW_ALL_GOOGLE_USERS", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
     if no_confirmation_gate is None:
         no_confirmation_gate = (
             os.environ.get("NO_CONFIRMATION_GATE", "true").strip().lower() not in ("0", "false", "no")
         )
+    devbox_headers = (
+        {"Authorization": f"Bearer {resolved_devbox_token}"} if resolved_devbox_token else {}
+    )
 
     tool_annotations = (
         {
@@ -110,12 +127,17 @@ def create_mcp_server(
             ),
         ] = 10_000,
     ) -> str:
-        enforce_allowed_email(resolved_emails)
+        enforce_allowed_email(
+            resolved_emails,
+            auth_enabled=auth_enabled,
+            allow_all_users=allow_all_users,
+        )
         clamped_yield = max(0, min(int(yield_time_ms), MAX_CELL_YIELD_TIME_MS))
         timeout_s = max(15.0, (clamped_yield / 1000.0) + 12.0)
         async with httpx.AsyncClient(timeout=timeout_s) as http:
             resp = await http.post(
                 f"{resolved_devbox_url}/exec",
+                headers=devbox_headers,
                 json={
                     "code": code,
                     "yield_time_ms": clamped_yield,
@@ -156,12 +178,17 @@ def create_mcp_server(
             Field(description="Set true to stop the running exec cell."),
         ] = False,
     ) -> str:
-        enforce_allowed_email(resolved_emails)
+        enforce_allowed_email(
+            resolved_emails,
+            auth_enabled=auth_enabled,
+            allow_all_users=allow_all_users,
+        )
         clamped_yield = max(0, min(int(yield_time_ms), MAX_CELL_YIELD_TIME_MS))
         timeout_s = max(15.0, (clamped_yield / 1000.0) + 12.0)
         async with httpx.AsyncClient(timeout=timeout_s) as http:
             resp = await http.post(
                 f"{resolved_devbox_url}/wait",
+                headers=devbox_headers,
                 json={
                     "cell_id": cell_id,
                     "yield_time_ms": clamped_yield,

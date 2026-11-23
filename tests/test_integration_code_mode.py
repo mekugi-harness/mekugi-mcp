@@ -8,6 +8,7 @@ import re
 import socket
 from pathlib import Path
 
+import httpx
 import pytest
 import uvicorn
 from fastmcp import Client
@@ -107,6 +108,7 @@ async def test_fastmcp_to_devbox_full_stack(tmp_path: Path) -> None:
         grpc_target=f"127.0.0.1:{grpc_port}",
         host_binary=HOST_BIN,
         workdir=str(tmp_path),
+        internal_token="secret-internal-token",
     )
     config = uvicorn.Config(app, host="127.0.0.1", port=http_port, log_level="warning")
     server = uvicorn.Server(config)
@@ -119,8 +121,13 @@ async def test_fastmcp_to_devbox_full_stack(tmp_path: Path) -> None:
             await asyncio.sleep(0.05)
         assert server.started
 
+        async with httpx.AsyncClient() as http:
+            denied = await http.post(f"http://127.0.0.1:{http_port}/exec", json={"code": "text('x');"})
+            assert denied.status_code == 401
+
         mcp = create_mcp_server(
             devbox_url=f"http://127.0.0.1:{http_port}",
+            devbox_token="secret-internal-token",
             use_env_auth=False,
         )
         async with Client(mcp) as client:

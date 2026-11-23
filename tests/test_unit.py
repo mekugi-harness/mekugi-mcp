@@ -9,7 +9,7 @@ import pytest
 from fastmcp import Client
 
 from mekugi_mcp.apply_patch import PatchError, apply_patch
-from mekugi_mcp.auth import build_google_auth_provider, parse_allowed_emails
+from mekugi_mcp.auth import build_google_auth_provider, enforce_allowed_email, parse_allowed_emails
 from mekugi_mcp.pragma import parse_exec_source
 from mekugi_mcp.schema_sanitizer import FORBIDDEN_SCHEMA_KEYS, sanitize_gemini_schema
 from mekugi_mcp.server import create_mcp_server
@@ -135,16 +135,24 @@ async def test_mcp_list_tools_gemini_safe_and_no_gate() -> None:
 
 def test_google_auth_provider_construction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AUTH_DISABLED", raising=False)
+    monkeypatch.delenv("ALLOWED_EMAILS", raising=False)
+    monkeypatch.delenv("ALLOW_ALL_GOOGLE_USERS", raising=False)
     monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-id.apps.googleusercontent.com")
     monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "test-secret")
     monkeypatch.setenv("BASE_URL", "https://mcp.example.com")
     monkeypatch.setenv("JWT_SIGNING_KEY", "super-secret-signing-key-32-bytes")
     monkeypatch.setenv("OAUTH_STORAGE_DIR", str(tmp_path / "oauth"))
 
+    with pytest.raises(RuntimeError, match="ALLOWED_EMAILS"):
+        build_google_auth_provider()
+
+    monkeypatch.setenv("ALLOWED_EMAILS", "Alice@Example.com, bob@example.com ")
     provider = build_google_auth_provider()
     assert provider is not None
     assert (tmp_path / "oauth").exists()
     assert parse_allowed_emails("Alice@Example.com, bob@example.com ") == frozenset(
         {"alice@example.com", "bob@example.com"}
     )
+    with pytest.raises(PermissionError, match="ALLOWED_EMAILS"):
+        enforce_allowed_email(frozenset(), auth_enabled=True)
     assert os.environ["BASE_URL"] == "https://mcp.example.com"

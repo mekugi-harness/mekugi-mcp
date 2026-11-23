@@ -42,6 +42,8 @@ def build_google_auth_provider() -> GoogleProvider | None:
     client_id = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
     client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
     base_url = os.environ.get("BASE_URL", "").strip()
+    allowed_emails = parse_allowed_emails(os.environ.get("ALLOWED_EMAILS"))
+    allow_all = os.environ.get("ALLOW_ALL_GOOGLE_USERS", "").strip().lower() in ("1", "true", "yes")
 
     missing = [
         name
@@ -52,10 +54,12 @@ def build_google_auth_provider() -> GoogleProvider | None:
         )
         if not val
     ]
+    if not allowed_emails and not allow_all:
+        missing.append("ALLOWED_EMAILS")
     if missing:
         raise RuntimeError(
             f"Missing required Google OAuth environment variables: {', '.join(missing)}. "
-            "Set them in .env or set AUTH_DISABLED=true for local development."
+            "Set them in .env (or ALLOW_ALL_GOOGLE_USERS=true / AUTH_DISABLED=true)."
         )
 
     jwt_signing_key = os.environ.get("JWT_SIGNING_KEY", "").strip() or client_secret
@@ -94,13 +98,20 @@ def build_google_auth_provider() -> GoogleProvider | None:
     )
 
 
-def enforce_allowed_email(allowed_emails: frozenset[str]) -> None:
+def enforce_allowed_email(
+    allowed_emails: frozenset[str],
+    *,
+    auth_enabled: bool = True,
+    allow_all_users: bool = False,
+) -> None:
     """Reject tool calls from Google accounts not in ALLOWED_EMAILS."""
-    if not allowed_emails:
+    if not auth_enabled or allow_all_users:
         return
+    if not allowed_emails:
+        raise PermissionError("ALLOWED_EMAILS is empty; refusing access.")
     token = get_access_token()
     if token is None:
-        return
+        raise PermissionError("Missing authenticated Google access token.")
     email = str(token.claims.get("email", "")).strip().lower()
     if email not in allowed_emails:
         raise PermissionError(f"Access denied for Google account: {email or 'unknown'}")
