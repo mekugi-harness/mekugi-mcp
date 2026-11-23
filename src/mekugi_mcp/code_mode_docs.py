@@ -25,9 +25,13 @@ NESTED_TOOLS_SECTION = """Nested tools available on `tools`:
 - `await tools.write_stdin({ session_id: number, chars?: string, yield_time_ms?: number, max_output_tokens?: number }): Promise<string>`
 - `await tools.apply_patch(patch: string): Promise<string>` (Codex `*** Begin Patch` ... `*** End Patch` format)"""
 
-GEMINI_YIELD_CAP_NOTE = (
-    "Note: `yield_time_ms` is capped at 45000 ms to stay within Gemini Web's tool timeout; "
-    "if still running, continue with `wait` using the returned `cell_id`."
+MCP_BRIDGE_NOTES = (
+    "MCP bridge notes:\n"
+    "- `yield_time_ms` is capped at 45000 ms to stay within Gemini Web's tool timeout; "
+    "if still running, continue with `wait` using the returned `cell_id`.\n"
+    "- This MCP server returns text-only tool results: use `text(...)` for all output. "
+    "`image()`, `audio()`, and `generatedImage()` are returned as truncated text placeholders "
+    "rather than binary media blocks."
 )
 
 WAIT_MCP_ADDENDUM = (
@@ -116,7 +120,7 @@ def render_tool_descriptions(
         .replace("{{ image_helper }}", docs.image_helper_description)
         .strip()
     )
-    exec_description = f"{exec_body}\n\n{NESTED_TOOLS_SECTION}\n\n{GEMINI_YIELD_CAP_NOTE}"
+    exec_description = f"{exec_body}\n\n{NESTED_TOOLS_SECTION}\n\n{MCP_BRIDGE_NOTES}"
     wait_description = f"{docs.wait_description_template.strip()}\n{WAIT_MCP_ADDENDUM}"
     return exec_description, wait_description
 

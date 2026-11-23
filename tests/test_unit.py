@@ -418,6 +418,7 @@ const WAIT_DESCRIPTION_TEMPLATE: &str = r#"- Wait for cell_id."#;
     assert 'Contains "# safely' in exec_desc
     assert "{{" not in exec_desc
     assert "tools.exec_command" in exec_desc
+    assert "text-only tool results" in exec_desc
     assert "Wait for cell_id." in wait_desc
     assert "terminate: true" in wait_desc
 
