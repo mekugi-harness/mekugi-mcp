@@ -17,6 +17,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from mekugi_mcp.code_mode_client import MAX_CELL_YIELD_TIME_MS, CodeModeHostClient
+from mekugi_mcp.code_mode_docs import load_extracted_docs_file
 
 logger = logging.getLogger(__name__)
 
@@ -93,12 +94,19 @@ def create_devbox_app(
     default_shell: str | None = None,
     max_yield_time_ms: int | None = None,
     internal_token: str | None = None,
+    docs_path: str | None = None,
 ) -> Starlette:
     target = grpc_target or os.environ.get("CODE_MODE_HOST_TARGET", "127.0.0.1:50051")
     binary = host_binary if host_binary is not None else os.environ.get("CODE_MODE_HOST_BIN", "/usr/local/bin/codex-code-mode-host")
     cwd = workdir or os.environ.get("DEVBOX_WORKDIR", "/workspace")
     shell = default_shell or os.environ.get("DEVBOX_SHELL", "/bin/bash")
     max_yield = max_yield_time_ms or int(os.environ.get("MAX_CELL_YIELD_TIME_MS", str(MAX_CELL_YIELD_TIME_MS)))
+    resolved_docs_path = (
+        docs_path
+        if docs_path is not None
+        else os.environ.get("CODE_MODE_DOCS_PATH", "/usr/local/share/mekugi/code-mode-docs.json")
+    )
+    extracted_docs = load_extracted_docs_file(resolved_docs_path) if resolved_docs_path else None
     expected_token = (
         internal_token
         if internal_token is not None
@@ -196,9 +204,17 @@ def create_devbox_app(
             logger.exception("Error in /wait")
             return JSONResponse({"error": str(exc)}, status_code=500)
 
+    async def handle_code_mode_docs(request: Request) -> JSONResponse:
+        if (denied := _authorize(request)) is not None:
+            return denied
+        if extracted_docs is None:
+            return JSONResponse({"error": "Extracted code-mode docs not available"}, status_code=404)
+        return JSONResponse(extracted_docs.to_dict())
+
     return Starlette(
         routes=[
             Route("/health", health, methods=["GET"]),
+            Route("/code-mode-docs", handle_code_mode_docs, methods=["GET"]),
             Route("/exec", handle_exec, methods=["POST"]),
             Route("/wait", handle_wait, methods=["POST"]),
         ],

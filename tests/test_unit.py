@@ -14,6 +14,11 @@ from mekugi_mcp import pty_manager
 from mekugi_mcp.apply_patch import PatchError, apply_patch
 from mekugi_mcp.auth import build_google_auth_provider, enforce_allowed_email, parse_allowed_emails
 from mekugi_mcp.code_mode_client import CodeModeHostClient
+from mekugi_mcp.code_mode_docs import (
+    parse_description_rs,
+    render_tool_descriptions,
+    resolve_mcp_tool_descriptions,
+)
 from mekugi_mcp.pragma import parse_exec_source
 from mekugi_mcp.proto import code_mode_v1_pb2 as pb
 from mekugi_mcp.pty_manager import ProcessManager
@@ -396,6 +401,34 @@ async def test_code_mode_client_catalog_negotiation_and_reconnect(tmp_path: Path
     await modern_client.execute('text("3");')
     assert len(modern_stub.requests[2].enabled_tools) > 0
     assert modern_stub.requests[2].session_id == "sess-2"
+
+
+def test_extract_and_render_code_mode_docs(tmp_path: Path) -> None:
+    sample_rs = '''
+const UNIFIED_IMAGE_HELPER_DESCRIPTION: &str = r#"`image(x)`: img helper."#;
+const EXEC_DESCRIPTION_TEMPLATE: &str = r##"Run JS (default {{ default_exec_yield_time_ms }} ms)
+- {{ image_helper }}
+- Contains "# safely"##;
+const WAIT_DESCRIPTION_TEMPLATE: &str = r#"- Wait for cell_id."#;
+'''
+    docs = parse_description_rs(sample_rs, source_repo="yusing/codex", source_ref="abc123")
+    exec_desc, wait_desc = render_tool_descriptions(docs, default_exec_yield_time_ms=10_000)
+    assert "default 10000 ms" in exec_desc
+    assert "`image(x)`: img helper." in exec_desc
+    assert 'Contains "# safely' in exec_desc
+    assert "{{" not in exec_desc
+    assert "tools.exec_command" in exec_desc
+    assert "Wait for cell_id." in wait_desc
+    assert "terminate: true" in wait_desc
+
+    docs_file = tmp_path / "code-mode-docs.json"
+    import json
+
+    docs_file.write_text(json.dumps(docs.to_dict()), encoding="utf-8")
+    resolved_exec, resolved_wait, ref = resolve_mcp_tool_descriptions(docs_path=str(docs_file))
+    assert ref == "abc123"
+    assert resolved_exec == exec_desc
+    assert resolved_wait == wait_desc
 
 
 @pytest.mark.asyncio

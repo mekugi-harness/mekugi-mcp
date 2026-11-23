@@ -19,8 +19,8 @@ from mekugi_mcp.auth import (
     parse_allowed_emails,
 )
 from mekugi_mcp.code_mode_client import DEFAULT_CELL_YIELD_TIME_MS, MAX_CELL_YIELD_TIME_MS
+from mekugi_mcp.code_mode_docs import resolve_mcp_tool_descriptions
 from mekugi_mcp.schema_sanitizer import GeminiSchemaSanitizerMiddleware
-from mekugi_mcp.tool_catalog import EXEC_TOOL_DESCRIPTION, WAIT_TOOL_DESCRIPTION
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,7 @@ def create_mcp_server(
     allowed_emails: frozenset[str] | None = None,
     allow_all_users: bool | None = None,
     no_confirmation_gate: bool | None = None,
+    docs_path: str | None = None,
 ) -> FastMCP:
     resolved_devbox_url = (devbox_url or os.environ.get("DEVBOX_URL", "http://devbox:8080")).rstrip("/")
     resolved_devbox_token = (
@@ -80,6 +81,13 @@ def create_mcp_server(
         }
     )
 
+    exec_description, wait_description, docs_source_ref = resolve_mcp_tool_descriptions(
+        docs_path=docs_path,
+        devbox_url=resolved_devbox_url,
+        devbox_headers=devbox_headers,
+        default_exec_yield_time_ms=DEFAULT_CELL_YIELD_TIME_MS,
+    )
+
     mcp = FastMCP(
         name="mekugi-devbox",
         instructions=SERVER_INSTRUCTIONS,
@@ -93,13 +101,19 @@ def create_mcp_server(
             async with httpx.AsyncClient(timeout=5.0) as http:
                 resp = await http.get(f"{resolved_devbox_url}/health")
                 resp.raise_for_status()
-                return JSONResponse({"status": "ok", "devbox": resp.json()})
+                return JSONResponse(
+                    {
+                        "status": "ok",
+                        "code_mode_docs_ref": docs_source_ref,
+                        "devbox": resp.json(),
+                    }
+                )
         except Exception as exc:
             return JSONResponse({"status": "degraded", "error": str(exc)}, status_code=503)
 
     @mcp.tool(
         name="exec",
-        description=EXEC_TOOL_DESCRIPTION,
+        description=exec_description,
         annotations=tool_annotations,
         output_schema=None,
     )
@@ -151,7 +165,7 @@ def create_mcp_server(
 
     @mcp.tool(
         name="wait",
-        description=WAIT_TOOL_DESCRIPTION,
+        description=wait_description,
         annotations=tool_annotations,
         output_schema=None,
     )
