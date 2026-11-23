@@ -433,6 +433,30 @@ const WAIT_DESCRIPTION_TEMPLATE: &str = r#"- Wait for cell_id."#;
 
 
 @pytest.mark.asyncio
+async def test_mcp_refreshes_tool_descriptions_after_devbox_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mekugi_mcp import server as server_mod
+
+    state: dict[str, tuple[str, str, str] | None] = {"live": None}
+
+    async def _fake_fetch(**_kwargs: object) -> tuple[str, str, str] | None:
+        return state["live"]
+
+    monkeypatch.setattr(server_mod, "fetch_devbox_tool_descriptions", _fake_fetch)
+
+    mcp = create_mcp_server(devbox_url="http://127.0.0.1:9", use_env_auth=False)
+    async with Client(mcp) as client:
+        before = {t.name: t.description for t in await client.list_tools()}
+        assert "Upgraded Mekugi exec" not in (before["exec"] or "")
+
+        state["live"] = ("Upgraded Mekugi exec", "Upgraded Mekugi wait", "rev-2")
+        after = {t.name: t.description for t in await client.list_tools()}
+        assert after["exec"] == "Upgraded Mekugi exec"
+        assert after["wait"] == "Upgraded Mekugi wait"
+
+
+@pytest.mark.asyncio
 async def test_pty_manager_cancelling_exec_command_terminates_process(tmp_path: Path) -> None:
     mgr = ProcessManager(default_workdir=str(tmp_path))
     task = asyncio.create_task(mgr.exec_command("sleep 30", yield_time_ms=10_000))

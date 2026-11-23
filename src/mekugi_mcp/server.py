@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Annotated
+from collections.abc import Sequence
+from typing import Annotated, Any
 
 import httpx
 import uvicorn
 from fastmcp import FastMCP
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools.base import Tool
 from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -19,7 +22,10 @@ from mekugi_mcp.auth import (
     parse_allowed_emails,
 )
 from mekugi_mcp.code_mode_client import DEFAULT_CELL_YIELD_TIME_MS, MAX_CELL_YIELD_TIME_MS
-from mekugi_mcp.code_mode_docs import resolve_mcp_tool_descriptions
+from mekugi_mcp.code_mode_docs import (
+    fetch_devbox_tool_descriptions,
+    resolve_mcp_tool_descriptions,
+)
 from mekugi_mcp.schema_sanitizer import GeminiSchemaSanitizerMiddleware
 
 logger = logging.getLogger(__name__)
@@ -81,18 +87,50 @@ def create_mcp_server(
         }
     )
 
+    static_docs_path = docs_path or os.environ.get("CODE_MODE_DOCS_PATH", "").strip() or None
     exec_description, wait_description, docs_source_ref = resolve_mcp_tool_descriptions(
-        docs_path=docs_path,
+        docs_path=static_docs_path,
         devbox_url=resolved_devbox_url,
         devbox_headers=devbox_headers,
         default_exec_yield_time_ms=DEFAULT_CELL_YIELD_TIME_MS,
     )
+    docs_state: dict[str, str | None] = {
+        "exec": exec_description,
+        "wait": wait_description,
+        "ref": docs_source_ref,
+    }
+
+    class _LiveCodeModeDocsMiddleware(Middleware):
+        """Refreshes exec/wait descriptions from devbox on tools/list after recovery or upgrade."""
+
+        async def on_list_tools(
+            self,
+            context: MiddlewareContext[Any],
+            call_next: CallNext[Any, Sequence[Tool]],
+        ) -> Sequence[Tool]:
+            if static_docs_path is None:
+                refreshed = await fetch_devbox_tool_descriptions(
+                    devbox_url=resolved_devbox_url,
+                    devbox_headers=devbox_headers,
+                    default_exec_yield_time_ms=DEFAULT_CELL_YIELD_TIME_MS,
+                )
+                if refreshed is not None:
+                    docs_state["exec"], docs_state["wait"], docs_state["ref"] = refreshed
+            tools = await call_next(context)
+            updated: list[Tool] = []
+            for tool in tools:
+                if tool.name == "exec" and docs_state["exec"]:
+                    tool = tool.model_copy(update={"description": docs_state["exec"]})
+                elif tool.name == "wait" and docs_state["wait"]:
+                    tool = tool.model_copy(update={"description": docs_state["wait"]})
+                updated.append(tool)
+            return updated
 
     mcp = FastMCP(
         name="mekugi-devbox",
         instructions=SERVER_INSTRUCTIONS,
         auth=resolved_auth,  # type: ignore[arg-type]
-        middleware=[GeminiSchemaSanitizerMiddleware()],
+        middleware=[_LiveCodeModeDocsMiddleware(), GeminiSchemaSanitizerMiddleware()],
     )
 
     @mcp.custom_route("/health", methods=["GET"])
@@ -104,7 +142,7 @@ def create_mcp_server(
                 return JSONResponse(
                     {
                         "status": "ok",
-                        "code_mode_docs_ref": docs_source_ref,
+                        "code_mode_docs_ref": docs_state["ref"],
                         "devbox": resp.json(),
                     }
                 )

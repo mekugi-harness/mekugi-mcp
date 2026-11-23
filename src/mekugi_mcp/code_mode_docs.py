@@ -179,6 +179,32 @@ def resolve_mcp_tool_descriptions(
     return EXEC_TOOL_DESCRIPTION, WAIT_TOOL_DESCRIPTION, None
 
 
+async def fetch_devbox_tool_descriptions(
+    *,
+    devbox_url: str,
+    devbox_headers: dict[str, str] | None = None,
+    default_exec_yield_time_ms: int = 10_000,
+    timeout_s: float = 2.0,
+) -> tuple[str, str, str] | None:
+    """Asynchronously fetch and render live code-mode docs from a running devbox."""
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as http:
+            resp = await http.get(
+                f"{devbox_url.rstrip('/')}/code-mode-docs",
+                headers=devbox_headers or {},
+            )
+            if resp.status_code != 200:
+                return None
+            docs = ExtractedCodeModeDocs.from_dict(resp.json())
+            exec_desc, wait_desc = render_tool_descriptions(
+                docs, default_exec_yield_time_ms=default_exec_yield_time_ms
+            )
+            return exec_desc, wait_desc, docs.source_ref
+    except Exception as exc:
+        logger.debug("Could not refresh code-mode docs from devbox %s: %s", devbox_url, exc)
+        return None
+
+
 def fetch_description_rs(*, repo: str, ref: str, timeout_s: float = 30.0) -> str:
     url = f"https://raw.githubusercontent.com/{repo}/{ref}/{DESCRIPTION_RS_PATH}"
     resp = httpx.get(url, follow_redirects=True, timeout=timeout_s)
