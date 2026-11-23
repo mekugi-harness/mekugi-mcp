@@ -93,6 +93,58 @@ def test_apply_patch_missing_context_raises(tmp_path: Path) -> None:
         )
 
 
+def test_apply_patch_eof_edits_final_occurrence(tmp_path: Path) -> None:
+    (tmp_path / "dup.txt").write_text("block\nmiddle\nblock\n")
+    apply_patch(
+        "*** Begin Patch\n*** Update File: dup.txt\n@@\n-block\n+tail\n*** End of File\n*** End Patch",
+        workdir=str(tmp_path),
+    )
+    assert (tmp_path / "dup.txt").read_text() == "block\nmiddle\ntail\n"
+
+
+def test_apply_patch_scoped_hunk_rejects_missing_or_out_of_scope(tmp_path: Path) -> None:
+    (tmp_path / "scoped.txt").write_text("def a():\n    x = 1\ndef b():\n    y = 2\n")
+    with pytest.raises(PatchError):
+        apply_patch(
+            "*** Begin Patch\n*** Update File: scoped.txt\n@@ def missing():\n-    x = 1\n+    x = 2\n*** End Patch",
+            workdir=str(tmp_path),
+        )
+    with pytest.raises(PatchError):
+        apply_patch(
+            "*** Begin Patch\n*** Update File: scoped.txt\n@@ def b():\n-    x = 1\n+    x = 2\n*** End Patch",
+            workdir=str(tmp_path),
+        )
+    assert (tmp_path / "scoped.txt").read_text() == "def a():\n    x = 1\ndef b():\n    y = 2\n"
+
+
+def test_apply_patch_truncated_commits_nothing(tmp_path: Path) -> None:
+    with pytest.raises(PatchError, match="End Patch"):
+        apply_patch(
+            "*** Begin Patch\n*** Add File: partial.txt\n+hello\n",
+            workdir=str(tmp_path),
+        )
+    assert not (tmp_path / "partial.txt").exists()
+
+
+def test_apply_patch_append_only_appends_to_end(tmp_path: Path) -> None:
+    (tmp_path / "log.txt").write_text("first\nsecond\n")
+    apply_patch(
+        "*** Begin Patch\n*** Update File: log.txt\n@@\n+third\n*** End Patch",
+        workdir=str(tmp_path),
+    )
+    assert (tmp_path / "log.txt").read_text() == "first\nsecond\nthird\n"
+
+
+def test_apply_patch_preserves_crlf(tmp_path: Path) -> None:
+    target = tmp_path / "win.txt"
+    target.write_bytes(b"one\r\ntwo\r\nthree\r\n")
+    apply_patch(
+        "*** Begin Patch\n*** Update File: win.txt\n@@\n one\n-two\n+TWO\n three\n*** End Patch",
+        workdir=str(tmp_path),
+    )
+    assert target.read_bytes() == b"one\r\nTWO\r\nthree\r\n"
+
+
 def test_sanitize_gemini_schema_strips_forbidden_keys() -> None:
     raw = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
