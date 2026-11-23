@@ -214,6 +214,23 @@ def test_apply_patch_replace_file_with_directory_child(tmp_path: Path) -> None:
     assert (tmp_path / "mod" / "index.py").read_text() == "new\n"
 
 
+def test_apply_patch_conflicting_file_and_dir_writes_preserves_original(tmp_path: Path) -> None:
+    mod = tmp_path / "mod"
+    mod.write_text("keep\n")
+    patch = (
+        "*** Begin Patch\n"
+        "*** Delete File: mod\n"
+        "*** Add File: mod/sub\n"
+        "+file\n"
+        "*** Add File: mod/sub/child\n"
+        "+child\n"
+        "*** End Patch"
+    )
+    with pytest.raises(PatchError, match="Conflicting patch paths"):
+        apply_patch(patch, workdir=str(tmp_path))
+    assert mod.read_text() == "keep\n"
+
+
 def test_sanitize_gemini_schema_strips_forbidden_keys() -> None:
     raw = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

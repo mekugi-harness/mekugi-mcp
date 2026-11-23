@@ -316,6 +316,8 @@ def apply_patch(patch_text: str, workdir: str = "/workspace") -> str:
         for parent in path.parents:
             if parent == base or base not in parent.parents:
                 break
+            if parent in writes:
+                raise PatchError(f"Conflicting patch paths (file and directory): {parent}")
             if parent.is_file():
                 if parent in deletes:
                     blocking_deletes.add(parent)
