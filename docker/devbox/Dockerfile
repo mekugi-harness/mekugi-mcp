@@ -4,8 +4,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG TARGETARCH
 ARG MEKUGI_VERSION=v0.7.0
-ARG MEKUGI_REPO=yusing/mekugi
-ARG CODEX_REPO=yusing/codex
+ARG MEKUGI_REPO=mekugi-harness/mekugi
 ARG DOTFILES_SETUP_URL=https://raw.githubusercontent.com/yusing/agentic-dotfiles/main/setup.sh
 ARG DOTFILES_TOOLS=agent,go,rust,browser
 
@@ -58,7 +57,7 @@ COPY src ./src
 RUN /usr/bin/python3 -m venv /opt/mekugi-mcp/.venv \
     && /opt/mekugi-mcp/.venv/bin/pip install --no-cache-dir . \
     && /opt/mekugi-mcp/.venv/bin/python -m mekugi_mcp.code_mode_docs \
-        --repo "${CODEX_REPO}" \
+        --repo "${MEKUGI_REPO}" \
         --ref-file /usr/local/share/mekugi/SOURCE_REVISION \
         --output /usr/local/share/mekugi/code-mode-docs.json
 

@@ -17,7 +17,7 @@ from mekugi_mcp.tool_catalog import EXEC_TOOL_DESCRIPTION, WAIT_TOOL_DESCRIPTION
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CODEX_REPO = "yusing/codex"
+DEFAULT_MEKUGI_REPO = "mekugi-harness/mekugi"
 DESCRIPTION_RS_PATH = "codex-rs/code-mode-protocol/src/description.rs"
 
 NESTED_TOOLS_SECTION = """Nested tools available on `tools`:
@@ -214,9 +214,9 @@ def fetch_description_rs(*, repo: str, ref: str, timeout_s: float = 30.0) -> str
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Extract Mekugi code-mode tool descriptions from codex description.rs"
+        description="Extract Mekugi code-mode tool descriptions from Mekugi's description.rs"
     )
-    parser.add_argument("--repo", default=DEFAULT_CODEX_REPO, help="GitHub owner/repo for codex fork")
+    parser.add_argument("--repo", default=DEFAULT_MEKUGI_REPO, help="GitHub owner/repo for Mekugi monorepo")
     ref_group = parser.add_mutually_exclusive_group(required=True)
     ref_group.add_argument("--ref", help="Git ref/SHA matching the downloaded Mekugi binary")
     ref_group.add_argument("--ref-file", help="Path to SOURCE_REVISION file from Mekugi tarball")

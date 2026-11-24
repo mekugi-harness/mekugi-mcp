@@ -411,7 +411,7 @@ const EXEC_DESCRIPTION_TEMPLATE: &str = r##"Run JS (default {{ default_exec_yiel
 - Contains "# safely"##;
 const WAIT_DESCRIPTION_TEMPLATE: &str = r#"- Wait for cell_id."#;
 '''
-    docs = parse_description_rs(sample_rs, source_repo="yusing/codex", source_ref="abc123")
+    docs = parse_description_rs(sample_rs, source_repo="mekugi-harness/mekugi", source_ref="abc123")
     exec_desc, wait_desc = render_tool_descriptions(docs, default_exec_yield_time_ms=10_000)
     assert "default 10000 ms" in exec_desc
     assert "`image(x)`: img helper." in exec_desc

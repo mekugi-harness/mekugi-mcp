@@ -118,7 +118,7 @@ async def test_fastmcp_to_devbox_full_stack(tmp_path: Path) -> None:
 
     docs_file = tmp_path / "code-mode-docs.json"
     docs_file.write_text(
-        '{"source_repo":"yusing/codex","source_ref":"test-rev",'
+        '{"source_repo":"mekugi-harness/mekugi","source_ref":"test-rev",'
         '"exec_description_template":"Mekugi canonical exec ({{ default_exec_yield_time_ms }}ms) {{ image_helper }}",'
         '"wait_description_template":"Mekugi canonical wait",'
         '"image_helper_description":"img-helper"}',
