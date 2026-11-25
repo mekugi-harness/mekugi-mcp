@@ -17,23 +17,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/yusing/mekugi-devbox
+  IMAGE: ghcr.io/mekugi-harness/mekugi-devbox
   DOTFILES_BASE: 0da4fb3db0e61c386329ab531f68049c55ca1c2e
   DOTFILES_REV: 5bf785724e967272442d45facdf9682b84096e12
 
 jobs:
-  access:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Request a token for the existing GHCR package
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          curl --fail --silent --show-error --output /dev/null \
-            --user "$GITHUB_ACTOR:$GH_TOKEN" --get https://ghcr.io/token \
-            --data-urlencode service=ghcr.io \
-            --data-urlencode scope=repository:yusing/mekugi-devbox:pull,push
-
   build:
     strategy:
       fail-fast: false
@@ -125,7 +113,7 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [access, build]
+    needs: build
     runs-on: ubuntu-24.04
     steps:
       - uses: docker/setup-buildx-action@v3
