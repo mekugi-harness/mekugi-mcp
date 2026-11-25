@@ -1,0 +1,33 @@
+[package]
+name = "mekugi-devbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mekugi-devbox"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+axum = "0.8"
+codex-utils-pty = { git = "https://github.com/mekugi-harness/mekugi.git", rev = "aabad8eb06e552561663c4514e3f26f6d809be76" }
+mekugi-transport = { path = "../mekugi-transport" }
+prost = "0.14.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tonic = { version = "0.14.3", features = ["transport"] }
+tonic-prost = "0.14.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+[build-dependencies]
+protoc-bin-vendored = "3"
+tonic-prost-build = "0.14.3"
+
+[dev-dependencies]
+tempfile = "3"

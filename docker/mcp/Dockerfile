@@ -1,9 +1,11 @@
 FROM python:3.14-slim AS wheel-builder
 
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     curl \
+    git \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -16,9 +18,9 @@ COPY proto ./proto
 COPY crates ./crates
 COPY src ./src
 
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/build/target \
+RUN --mount=type=cache,id=cargo-registry,target=/root/.cargo/registry \
+    --mount=type=cache,id=cargo-git,target=/root/.cargo/git \
+    --mount=type=cache,id=mcp-target-${TARGETARCH},target=/build/target \
     pip install --no-cache-dir "maturin>=1.7,<2.0" \
     && maturin build --release --locked --out /wheels
 

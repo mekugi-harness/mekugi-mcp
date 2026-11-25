@@ -11,9 +11,6 @@ requires-python = ">=3.12"
 dependencies = [
     "cryptography>=44.0.0",
     "fastmcp>=2.13.0",
-    "grpcio>=1.85.3",
-    "httpx>=0.28.0",
-    "protobuf>=7.35.1",
     "pydantic>=2.10.0",
     "starlette>=0.45.0",
     "uvicorn>=0.34.0",
@@ -21,7 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "grpcio-tools>=1.85.3",
+    "httpx>=0.28.0",
     "maturin>=1.7,<2.0",
     "pytest>=8.3.0",
     "pytest-asyncio>=0.25.0",
@@ -30,7 +27,6 @@ dev = [
 
 [project.scripts]
 mekugi-mcp = "mekugi_mcp.server:main"
-mekugi-devbox = "mekugi_mcp.devbox_server:main"
 
 [tool.maturin]
 manifest-path = "crates/mekugi-transport/Cargo.toml"
@@ -46,7 +42,6 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-exclude = ["src/mekugi_mcp/proto/*_pb2*.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "PIE"]
