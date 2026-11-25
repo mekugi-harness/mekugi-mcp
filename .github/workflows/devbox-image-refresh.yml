@@ -1,0 +1,136 @@
+name: Refresh devbox image
+
+on:
+  push:
+    branches: ['image-refresh/5bf785724']
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: mekugi-devbox-image-refresh
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/yusing/mekugi-devbox
+  DOTFILES_BASE: 0da4fb3db0e61c386329ab531f68049c55ca1c2e
+  DOTFILES_REV: 5bf785724e967272442d45facdf9682b84096e12
+
+jobs:
+  access:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Request a token for the existing GHCR package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl --fail --silent --show-error --output /dev/null \
+            --user "$GITHUB_ACTOR:$GH_TOKEN" --get https://ghcr.io/token \
+            --data-urlencode service=ghcr.io \
+            --data-urlencode scope=repository:yusing/mekugi-devbox:pull,push
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free amd64 runner disk space
+        if: matrix.arch == 'amd64'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift
+          docker system prune -af
+      - name: Stage the validated dotfiles projection
+        run: |
+          snapshot="$(mktemp -d)"
+          curl -fsSL "https://codeload.github.com/yusing/agentic-dotfiles/tar.gz/$DOTFILES_BASE" |
+            tar -xz --strip-components=1 -C "$snapshot"
+          git -C "$snapshot" init -q -b main
+          git -C "$snapshot" apply "$GITHUB_WORKSPACE/docker/devbox/dotfiles-refresh.patch"
+          jq -e --arg revision "$DOTFILES_REV" '.sourceCommit == $revision' \
+            "$snapshot/.public-config-projection.json" >/dev/null
+          git -C "$snapshot" add -f -- .
+          git -C "$snapshot" -c user.name='Devbox build' \
+            -c user.email='devbox@localhost' commit -qm "Project dotfiles $DOTFILES_REV"
+          tar -czf dotfiles-repo.tar.gz -C "$snapshot" .git
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build the devbox on its native architecture
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/devbox/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          tags: devbox-refresh:smoke
+          load: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/mekugi-harness/mekugi-mcp
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.mekugi.dotfiles.revision=${{ env.DOTFILES_REV }}
+          secrets: |
+            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
+          cache-from: type=gha,scope=devbox-refresh-${{ matrix.arch }}
+          cache-to: type=gha,scope=devbox-refresh-${{ matrix.arch }},mode=max
+      - name: Check startup, Code Mode, and development tools
+        run: |
+          cid="$(docker run -d --network none -v /workspace -v /home/ubuntu/.config \
+            -v /home/ubuntu/.local/share devbox-refresh:smoke)"
+          trap 'docker rm -f -v "$cid" >/dev/null' EXIT
+          for attempt in {1..30}; do
+            if docker exec "$cid" curl -fsS http://127.0.0.1:8080/health 2>/dev/null |
+              jq -e '.status == "ok"' >/dev/null; then
+              break
+            fi
+            if [ "$attempt" = 30 ]; then docker logs "$cid"; exit 1; fi
+            sleep 2
+          done
+          docker exec "$cid" curl -fsS http://127.0.0.1:8080/code-mode-docs |
+            jq -e '.source_ref == "21745192b584c0979cc718e7c7e428f73284fe3f"' >/dev/null
+          jq -n --arg code 'text(await tools.exec_command({cmd:"printf devbox-exec-ok"}));' '{code:$code}' |
+            docker exec -i "$cid" curl -fsS -H 'Content-Type: application/json' \
+              --data-binary @- http://127.0.0.1:8080/exec |
+            jq -e 'tostring | contains("devbox-exec-ok")' >/dev/null
+          docker exec "$cid" bash -ec 'go version; rustc --version; mold --version;
+            agent-browser --version; scriptc --version;
+            cargo new -q --vcs none /tmp/rust-smoke; cd /tmp/rust-smoke;
+            cargo run --quiet --offline | grep -Fx "Hello, world!"'
+      - name: Push the tested platform image
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          staging_tag="$IMAGE:refresh-$GITHUB_RUN_ID-$ARCH"
+          docker tag devbox-refresh:smoke "$staging_tag"
+          docker push "$staging_tag"
+
+  publish:
+    needs: [access, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Update the multi-platform registry tag
+        run: |
+          docker buildx imagetools create \
+            -t "$IMAGE:setup-${DOTFILES_REV:0:9}" -t "$IMAGE:latest" \
+            "$IMAGE:refresh-$GITHUB_RUN_ID-amd64" "$IMAGE:refresh-$GITHUB_RUN_ID-arm64"
+          docker buildx imagetools inspect "$IMAGE:latest"

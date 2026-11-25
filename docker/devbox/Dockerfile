@@ -5,7 +5,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG TARGETARCH
 ARG MEKUGI_VERSION=v0.7.0
 ARG MEKUGI_REPO=mekugi-harness/mekugi
-ARG DOTFILES_SETUP_URL=https://raw.githubusercontent.com/yusing/agentic-dotfiles/main/setup.sh
+ARG MEKUGI_ASSET_REPO=yusing/mekugi
 ARG DOTFILES_TOOLS=agent,go,rust,browser
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Pull prebuilt codex-code-mode-host and its SOURCE_REVISION from Mekugi GitHub Release.
 RUN set -eu; \
     mkdir -p /usr/local/share/mekugi; \
-    url="https://github.com/${MEKUGI_REPO}/releases/download/${MEKUGI_VERSION}/mekugi-native_linux_${TARGETARCH}.tar.gz"; \
+    url="https://github.com/${MEKUGI_ASSET_REPO}/releases/download/${MEKUGI_VERSION}/mekugi-native_linux_${TARGETARCH}.tar.gz"; \
     curl -fsSL "$url" | tar -xz -C /usr/local/share/mekugi codex-code-mode-host SOURCE_REVISION; \
     mv /usr/local/share/mekugi/codex-code-mode-host /usr/local/bin/codex-code-mode-host; \
     chmod +x /usr/local/bin/codex-code-mode-host; \
@@ -44,10 +44,20 @@ ENV HOME=/home/ubuntu \
     PATH="/home/ubuntu/.local/bin:/home/ubuntu/.local/share/mise/shims:/home/ubuntu/go/bin:/home/ubuntu/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
 WORKDIR /home/ubuntu
 
-RUN --mount=type=secret,id=GITHUB_TOKEN \
-    if [ -s /run/secrets/GITHUB_TOKEN ]; then export GITHUB_TOKEN="$(cat /run/secrets/GITHUB_TOKEN)"; fi \
-    && curl -fsSL "${DOTFILES_SETUP_URL}" | bash -s -- --tools="${DOTFILES_TOOLS}" \
-    && sudo rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,source=dotfiles-repo.tar.gz,target=/tmp/dotfiles-repo.tar.gz \
+    --mount=type=secret,id=GITHUB_TOKEN \
+    set -eu; \
+    if [ -s /run/secrets/GITHUB_TOKEN ]; then export GITHUB_TOKEN="$(cat /run/secrets/GITHUB_TOKEN)"; fi; \
+    repo="$(mktemp -d)"; \
+    trap 'rm -rf "$repo"' EXIT; \
+    tar -xzf /tmp/dotfiles-repo.tar.gz -C "$repo"; \
+    git_bin=/usr/bin/git; \
+    if [ ! -x "$git_bin" ]; then sudo apt-get update && sudo apt-get install -y --no-install-recommends git; fi; \
+    "$git_bin" -C "$repo" checkout -q -- .; \
+    sed -i "s|^REPO_URL=.*|REPO_URL=\"$repo\"|" "$repo/setup.sh"; \
+    bash "$repo/setup.sh" --tools="${DOTFILES_TOOLS}"; \
+    "$git_bin" remote set-url origin https://github.com/yusing/agentic-dotfiles.git; \
+    sudo rm -rf /var/lib/apt/lists/*
 
 USER root
 WORKDIR /opt/mekugi-mcp

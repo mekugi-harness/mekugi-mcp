@@ -1,0 +1,133 @@
+diff --git a/.local/bin/compile-agent-tools b/.local/bin/compile-agent-tools
+index b0db5f4..327dec6 100755
+--- a/.local/bin/compile-agent-tools
++++ b/.local/bin/compile-agent-tools
+@@ -1,5 +1,5 @@
+ #!/bin/sh
+-# version: 1.2.0
++# version: 1.2.1
+ # Rebuild changed user-owned helper and hook binaries for this machine.
+ 
+ set -eu
+@@ -19,7 +19,13 @@ if ! command -v bun >/dev/null 2>&1 || ! command -v scriptc >/dev/null 2>&1; the
+ 	export PATH
+ fi
+ scriptc_path=$(command -v scriptc)
+-scriptc_identity=$(realpath "$scriptc_path"):$("$scriptc_path" --version)
++scriptc_path=$(realpath "$scriptc_path")
++# Mise shims resolve to mise itself, not to the selected compiler.
++if [ "$(basename "$scriptc_path")" = mise ]; then
++	scriptc_path=$("$scriptc_path" which scriptc)
++	scriptc_path=$(realpath "$scriptc_path")
++fi
++scriptc_identity=$scriptc_path:$("$scriptc_path" --version)
+ target_identity=$(uname -s)-$(uname -m)
+ mkdir -p "$cache_root"
+ state=$cache_root/bootstrap.digest
+diff --git a/.local/bin/compile-agent-tools.changelog.md b/.local/bin/compile-agent-tools.changelog.md
+index 05a87b5..5986c1a 100644
+--- a/.local/bin/compile-agent-tools.changelog.md
++++ b/.local/bin/compile-agent-tools.changelog.md
+@@ -1,5 +1,10 @@
+ # Changelog
+ 
++## 1.2.1
++
++Resolve Mise shims to the selected scriptc executable so shim and activated
++shell paths reuse the same compiler engine.
++
+ ## 1.2.0
+ 
+ Build the compiler engine with scriptc. Cache it by compiler, target, linker,
+diff --git a/.local/lib/compile-agent-tools/CHANGELOG.md b/.local/lib/compile-agent-tools/CHANGELOG.md
+index c90f34f..4c89136 100644
+--- a/.local/lib/compile-agent-tools/CHANGELOG.md
++++ b/.local/lib/compile-agent-tools/CHANGELOG.md
+@@ -1,5 +1,10 @@
+ # Changelog
+ 
++## 1.1.1
++
++Resolve Mise compiler shims before fingerprinting and building, avoiding
++rebuilds when switching between shim and activated shell paths.
++
+ ## 1.1.0
+ 
+ Build the Herdr usage and task helpers, disk and temporary cleaners, Cargo
+diff --git a/.local/lib/compile-agent-tools/compile-agent-tools.ts b/.local/lib/compile-agent-tools/compile-agent-tools.ts
+index 8d4cada..377e87a 100644
+--- a/.local/lib/compile-agent-tools/compile-agent-tools.ts
++++ b/.local/lib/compile-agent-tools/compile-agent-tools.ts
+@@ -17,7 +17,7 @@ import {
+ import { arch, platform } from "node:os";
+ import { basename, delimiter, dirname, extname, join, resolve } from "node:path";
+ 
+-const VERSION = "1.1.0";
++const VERSION = "1.1.1";
+ const SOURCE_EXTENSIONS = new Set([".ts", ".json", ".lock", ".toml"]);
+ 
+ class BuildFailure {
+@@ -29,10 +29,18 @@ function commandPath(name: string): string {
+     const candidate = resolve(directory || ".", name);
+     try {
+       accessSync(candidate, constants.X_OK);
+-      return candidate;
+     } catch {
+       // Keep searching caller PATH in order.
++      continue;
+     }
++    const executable = realpathSync(candidate);
++    // Mise shims resolve to mise itself, not to the selected compiler.
++    if (basename(executable) !== "mise") return executable;
++    const result = spawnSync(executable, ["which", name], { encoding: "utf8" });
++    if (result.status !== 0 || result.error) {
++      throw new Error(`compile-agent-tools: cannot resolve mise compiler: ${name}`);
++    }
++    return realpathSync(result.stdout.trim());
+   }
+   throw new Error(`compile-agent-tools: command not found: ${name}`);
+ }
+diff --git a/.public-config-projection.json b/.public-config-projection.json
+index 5180ac1..aee091f 100644
+--- a/.public-config-projection.json
++++ b/.public-config-projection.json
+@@ -1,6 +1,6 @@
+ {
+   "schemaVersion": 1,
+-  "sourceCommit": "2bccbf3317a72abea9d599d78a92b96620d2e67f",
++  "sourceCommit": "5bf785724e967272442d45facdf9682b84096e12",
+   "outputs": [
+     {
+       "path": ".bash_profile",
+@@ -1127,13 +1127,13 @@
+     {
+       "path": ".local/bin/compile-agent-tools",
+       "kind": "file",
+-      "sha256": "7f091ba123ea48f3551ae02db3d38f69d96d8f6b7f6153afd8e5e248b83b73cb",
++      "sha256": "6a45dbc861a5ec8c24fe252adcb81cfd6f2a1ad9724486e0c0b69df42a4efceb",
+       "executable": true
+     },
+     {
+       "path": ".local/bin/compile-agent-tools.changelog.md",
+       "kind": "file",
+-      "sha256": "16fd0bd23bc7786ed12d6fbbcde69f53346f7f51b1ddb1327b97cf98fa7f01d1",
++      "sha256": "baef1f9dfe2f006ea13b88b3cee7e455cad5a4716180e0426fef650d703fa339",
+       "executable": false
+     },
+     {
+@@ -1157,13 +1157,13 @@
+     {
+       "path": ".local/lib/compile-agent-tools/CHANGELOG.md",
+       "kind": "file",
+-      "sha256": "547a07bc7ed78912ad78760120e99ca6eea91dd21c63f783f3cd0b6aebf2be13",
++      "sha256": "b341b7f854700067ce3666f987f4a592a11abdb27a086e7527294f231bb3b580",
+       "executable": false
+     },
+     {
+       "path": ".local/lib/compile-agent-tools/compile-agent-tools.ts",
+       "kind": "file",
+-      "sha256": "d77f142ff4eba2ad297fab82131d44f8e425e1452f11b41a2719d2b1b64630fe",
++      "sha256": "12fc27e268037a26d769d604450283ae06bb2f6b09954e774d8a39ce498b497a",
+       "executable": false
+     },
+     {
