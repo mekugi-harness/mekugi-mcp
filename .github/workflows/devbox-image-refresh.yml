@@ -71,14 +71,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build the devbox on its native architecture
+      - name: Build and stage the devbox by digest
+        id: image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/devbox/Dockerfile
           platforms: linux/${{ matrix.arch }}
-          tags: devbox-refresh:smoke
-          load: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.source=https://github.com/mekugi-harness/mekugi-mcp
             org.opencontainers.image.revision=${{ github.sha }}
@@ -86,11 +86,12 @@ jobs:
           secrets: |
             GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
           cache-from: type=gha,scope=devbox-refresh-${{ matrix.arch }}
-          cache-to: type=gha,scope=devbox-refresh-${{ matrix.arch }},mode=max
       - name: Check startup, Code Mode, and development tools
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           cid="$(docker run -d --network none -v /workspace -v /home/ubuntu/.config \
-            -v /home/ubuntu/.local/share devbox-refresh:smoke)"
+            -v /home/ubuntu/.local/share "$IMAGE@$DIGEST")"
           trap 'docker rm -f -v "$cid" >/dev/null' EXIT
           for attempt in {1..30}; do
             if docker exec "$cid" curl -fsS http://127.0.0.1:8080/health 2>/dev/null |
@@ -110,13 +111,18 @@ jobs:
             agent-browser --version; scriptc --version;
             cargo new -q --vcs none /tmp/rust-smoke; cd /tmp/rust-smoke;
             cargo run --quiet --offline | grep -Fx "Hello, world!"'
-      - name: Push the tested platform image
+      - name: Record tested digest
         env:
-          ARCH: ${{ matrix.arch }}
+          DIGEST: ${{ steps.image.outputs.digest }}
         run: |
-          staging_tag="$IMAGE:refresh-$GITHUB_RUN_ID-$ARCH"
-          docker tag devbox-refresh:smoke "$staging_tag"
-          docker push "$staging_tag"
+          mkdir -p /tmp/devbox-digests
+          touch "/tmp/devbox-digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: devbox-digest-${{ matrix.arch }}
+          path: /tmp/devbox-digests/*
+          if-no-files-found: error
+          retention-days: 1
 
   publish:
     needs: [access, build]
@@ -128,9 +134,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: devbox-digest-*
+          path: /tmp/devbox-digests
+          merge-multiple: true
       - name: Update the multi-platform registry tag
+        working-directory: /tmp/devbox-digests
         run: |
+          shopt -s nullglob
+          digests=(*)
+          test "${#digests[@]}" -eq 2
           docker buildx imagetools create \
             -t "$IMAGE:setup-${DOTFILES_REV:0:9}" -t "$IMAGE:latest" \
-            "$IMAGE:refresh-$GITHUB_RUN_ID-amd64" "$IMAGE:refresh-$GITHUB_RUN_ID-arm64"
+            "$IMAGE@sha256:${digests[0]}" "$IMAGE@sha256:${digests[1]}"
           docker buildx imagetools inspect "$IMAGE:latest"
