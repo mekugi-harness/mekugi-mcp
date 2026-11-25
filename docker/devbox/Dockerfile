@@ -1,5 +1,6 @@
 FROM ubuntu:26.04 AS rust-builder
 
+ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -17,9 +18,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY proto ./proto
 COPY crates ./crates
 
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/build/target \
+RUN --mount=type=cache,id=cargo-registry,target=/root/.cargo/registry \
+    --mount=type=cache,id=cargo-git,target=/root/.cargo/git \
+    --mount=type=cache,id=devbox-target-${TARGETARCH},target=/build/target \
     cargo build --release --locked -p mekugi-devbox \
     && cp /build/target/release/mekugi-devbox /usr/local/bin/mekugi-devbox
 

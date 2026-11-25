@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use tonic::Status;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::code_mode_client::{CodeModeHostClient, HostSupervisor, MAX_CELL_YIELD_TIME_MS};
 use crate::docs::{load_extracted_docs_file, parse_description_rs};
@@ -308,7 +308,7 @@ fn maybe_run_extract_docs(args: &[String]) -> Option<Result<(), String>> {
         Ok(d) => d,
         Err(e) => return Some(Err(e)),
     };
-    if let Some(parent) = out_path.parent()
+    if let Some(parent) = out_path.parent().filter(|p| !p.as_os_str().is_empty())
         && let Err(e) = fs::create_dir_all(parent)
     {
         return Some(Err(format!("Failed to create output dir: {e}")));
@@ -380,6 +380,11 @@ async fn main() {
         .ok()
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
+    if expected_token.is_none() {
+        warn!(
+            "DEVBOX_INTERNAL_TOKEN is unset; HTTP and gRPC endpoints will accept unauthenticated requests"
+        );
+    }
     let docs_path = env::var("CODE_MODE_DOCS_PATH")
         .unwrap_or_else(|_| "/usr/local/share/mekugi/code-mode-docs.json".into());
     let extracted_docs = if docs_path.trim().is_empty() {
@@ -468,13 +473,33 @@ async fn main() {
         }
     };
 
-    let _ = axum::serve(http_listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let http_handle = tokio::spawn(async move {
+        let _ = axum::serve(http_listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = http_shutdown_rx.await;
+            })
+            .await;
+    });
 
-    if let Some(srv) = grpc_server {
-        srv.stop().await;
-    }
+    shutdown_signal().await;
+    let _ = http_shutdown_tx.send(());
+
+    let http_drain = async {
+        if tokio::time::timeout(std::time::Duration::from_secs(5), http_handle)
+            .await
+            .is_err()
+        {
+            warn!("HTTP server drain timed out after 5s");
+        }
+    };
+    let grpc_drain = async {
+        if let Some(srv) = grpc_server {
+            srv.stop().await;
+        }
+    };
+    tokio::join!(http_drain, grpc_drain);
+
     client.close().await;
     supervisor.stop().await;
 }

@@ -167,7 +167,7 @@ fn apply_hunks(original: &str, hunks: &[PatchHunk], file_label: &str) -> Result<
     }
 
     let mut result = lines.join(newline);
-    if had_trailing_nl || (!lines.is_empty() && original.is_empty()) {
+    if !lines.is_empty() && (had_trailing_nl || original.is_empty()) {
         result.push_str(newline);
     }
     Ok(result)
@@ -318,7 +318,7 @@ fn parse_patch(patch_text: &str, base: &Path) -> Result<Vec<PatchOp>, PatchError
     Ok(ops)
 }
 
-fn write_exact(path: &Path, content: &str) -> Result<(), PatchError> {
+fn write_exact(path: &Path, content: &str, mode_override: Option<u32>) -> Result<(), PatchError> {
     let parent = path
         .parent()
         .ok_or_else(|| PatchError(format!("Invalid target path: {}", path.display())))?;
@@ -328,11 +328,15 @@ fn write_exact(path: &Path, content: &str) -> Result<(), PatchError> {
     #[cfg(unix)]
     let mode = {
         use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path)
-            .ok()
-            .map(|m| m.permissions().mode() & 0o7777)
-            .unwrap_or(0o644)
+        mode_override.unwrap_or_else(|| {
+            fs::metadata(path)
+                .ok()
+                .map(|m| m.permissions().mode() & 0o7777)
+                .unwrap_or(0o644)
+        })
     };
+    #[cfg(not(unix))]
+    let _ = mode_override;
 
     let tmp_path = parent.join(format!(".mekugi-patch-{}", Uuid::new_v4().simple()));
     let write_res = (|| -> std::io::Result<()> {
@@ -361,6 +365,7 @@ pub fn apply_patch(patch_text: &str, workdir: &Path) -> Result<String, PatchErro
 
     // Stage all edits in memory before touching disk so malformed/truncated patches leave no partial writes.
     let mut staged: BTreeMap<PathBuf, Option<String>> = BTreeMap::new();
+    let mut staged_modes: BTreeMap<PathBuf, u32> = BTreeMap::new();
     let mut summary = Vec::new();
 
     for op in ops {
@@ -411,6 +416,11 @@ pub fn apply_patch(patch_text: &str, workdir: &Path) -> Result<String, PatchErro
                     apply_hunks(&original, &hunks, &rel)?
                 };
                 if let (Some(mto), Some(mrel)) = (move_to, move_rel) {
+                    #[cfg(unix)]
+                    if let Ok(meta) = fs::metadata(&source) {
+                        use std::os::unix::fs::PermissionsExt;
+                        staged_modes.insert(mto.clone(), meta.permissions().mode() & 0o7777);
+                    }
                     if mto != source {
                         staged.insert(source, None);
                     }
@@ -444,7 +454,7 @@ pub fn apply_patch(patch_text: &str, workdir: &Path) -> Result<String, PatchErro
         }
         let mut cur = path.parent();
         while let Some(parent) = cur {
-            if parent == base || !parent.starts_with(&base) {
+            if parent == base || parent.as_os_str().is_empty() {
                 break;
             }
             if writes.contains_key(parent) {
@@ -474,7 +484,7 @@ pub fn apply_patch(patch_text: &str, workdir: &Path) -> Result<String, PatchErro
         }
     }
     for (path, content) in &writes {
-        write_exact(path, content)?;
+        write_exact(path, content, staged_modes.get(path).copied())?;
     }
     for path in deletes.difference(&blocking_deletes) {
         if path.exists() {

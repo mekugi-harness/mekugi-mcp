@@ -5,10 +5,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use codex_utils_pty::{
-    ChildFds, ProcessHandle, TerminalSize, combine_output_receivers, spawn_pipe_process,
-    spawn_pty_process,
+    ChildFds, ProcessHandle, TerminalSize, spawn_pipe_process, spawn_pty_process,
 };
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, watch};
 use tokio::task::JoinHandle;
 
 pub const DEFAULT_SHELL_YIELD_TIME_MS: u64 = 10_000;
@@ -19,7 +18,7 @@ const MAX_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 const EXITED_SESSION_TTL: Duration = Duration::from_secs(600);
 
 pub fn truncate_output(text: &str, max_tokens: usize) -> String {
-    let max_chars = (max_tokens * CHARS_PER_TOKEN).max(256);
+    let max_chars = max_tokens.saturating_mul(CHARS_PER_TOKEN).max(256);
     let total_chars = text.chars().count();
     if total_chars <= max_chars {
         return text.to_owned();
@@ -42,6 +41,7 @@ struct ManagedSession {
     started_at: Instant,
     buffer: Arc<Mutex<Vec<u8>>>,
     notify: Arc<Notify>,
+    exit_rx: watch::Receiver<bool>,
     reader_task: JoinHandle<()>,
     reaper_task: JoinHandle<()>,
 }
@@ -160,23 +160,43 @@ impl ProcessManager {
         let session_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let notify = Arc::new(Notify::new());
+        let (exit_watch_tx, exit_watch_rx) = watch::channel(false);
 
-        let mut combined_rx = combine_output_receivers(spawned.stdout_rx, spawned.stderr_rx);
+        // Drain stdout_rx and stderr_rx directly over lossless mpsc channels (no broadcast Lagged drops).
+        let mut stdout_rx = spawned.stdout_rx;
+        let mut stderr_rx = spawned.stderr_rx;
         let buf_clone = buffer.clone();
         let notify_clone = notify.clone();
         let reader_task = tokio::spawn(async move {
-            while let Ok(chunk) = combined_rx.recv().await {
-                if chunk.is_empty() {
-                    continue;
+            let mut stdout_open = true;
+            let mut stderr_open = true;
+            while stdout_open || stderr_open {
+                let maybe_chunk = tokio::select! {
+                    res = stdout_rx.recv(), if stdout_open => {
+                        if res.is_none() {
+                            stdout_open = false;
+                        }
+                        res
+                    }
+                    res = stderr_rx.recv(), if stderr_open => {
+                        if res.is_none() {
+                            stderr_open = false;
+                        }
+                        res
+                    }
+                };
+                if let Some(chunk) = maybe_chunk
+                    && !chunk.is_empty()
+                {
+                    let mut b = buf_clone.lock().await;
+                    b.extend_from_slice(&chunk);
+                    if b.len() > MAX_BUFFER_BYTES {
+                        let excess = b.len() - MAX_BUFFER_BYTES;
+                        b.drain(..excess);
+                    }
+                    drop(b);
+                    notify_clone.notify_waiters();
                 }
-                let mut b = buf_clone.lock().await;
-                b.extend_from_slice(&chunk);
-                if b.len() > MAX_BUFFER_BYTES {
-                    let excess = b.len() - MAX_BUFFER_BYTES;
-                    b.drain(..excess);
-                }
-                drop(b);
-                notify_clone.notify_waiters();
             }
             notify_clone.notify_waiters();
         });
@@ -186,6 +206,7 @@ impl ProcessManager {
         let exit_rx = spawned.exit_rx;
         let reaper_task = tokio::spawn(async move {
             let _ = exit_rx.await;
+            let _ = exit_watch_tx.send(true);
             notify_exit.notify_waiters();
             tokio::time::sleep(EXITED_SESSION_TTL).await;
             let mut map = sessions_clone.lock().await;
@@ -199,6 +220,7 @@ impl ProcessManager {
             started_at: Instant::now(),
             buffer,
             notify,
+            exit_rx: exit_watch_rx,
             reader_task,
             reaper_task,
         });
@@ -249,8 +271,9 @@ impl ProcessManager {
         max_tokens: usize,
     ) -> Result<String, String> {
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
+        let mut exit_watch = managed.exit_rx.clone();
         loop {
-            if managed.handle.has_exited() {
+            if *exit_watch.borrow() || managed.handle.has_exited() {
                 // Brief drain so reader_task flushes final pipe bytes.
                 tokio::time::sleep(Duration::from_millis(15)).await;
                 break;
@@ -260,17 +283,24 @@ impl ProcessManager {
                 break;
             }
             let remaining = deadline - now;
-            let _ = tokio::time::timeout(remaining, managed.notify.notified()).await;
+            // Wait on either exit watch (no lost wakeups) or new output notification.
+            let _ = tokio::time::timeout(remaining, async {
+                tokio::select! {
+                    _ = exit_watch.changed() => {}
+                    _ = managed.notify.notified() => {}
+                }
+            })
+            .await;
         }
 
         let elapsed = managed.started_at.elapsed().as_secs_f64();
         let output = truncate_output(&managed.drain_output().await, max_tokens);
 
-        if managed.handle.has_exited() {
+        if *exit_watch.borrow() || managed.handle.has_exited() {
             let code = managed.handle.exit_code().unwrap_or(-1);
-            // Remove session once drained after exit.
             let mut map = self.sessions.lock().await;
             if let Some(removed) = map.remove(&session_id) {
+                removed.reader_task.abort();
                 removed.reaper_task.abort();
             }
             Ok(format!(

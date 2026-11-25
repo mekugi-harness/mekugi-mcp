@@ -275,6 +275,7 @@ impl HostSupervisor {
             if let Some(child) = guard.as_mut()
                 && let Ok(Some(status)) = child.try_wait()
             {
+                *guard = None;
                 return Err(format!(
                     "codex-code-mode-host exited early with status {status}"
                 ));
@@ -283,6 +284,10 @@ impl HostSupervisor {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if let Some(mut child) = guard.take() {
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
         }
         Err(format!(
             "codex-code-mode-host did not listen on {} in time",
@@ -320,6 +325,7 @@ pub struct CodeModeHostClient {
     state: Arc<Mutex<SessionState>>,
     active_cells: Arc<Mutex<HashSet<String>>>,
     inflight_calls: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    cancelled_invocations: Arc<Mutex<HashSet<String>>>,
     session_lock: Mutex<()>,
 }
 
@@ -349,6 +355,7 @@ impl CodeModeHostClient {
             })),
             active_cells: Arc::new(Mutex::new(HashSet::new())),
             inflight_calls: Arc::new(Mutex::new(HashMap::new())),
+            cancelled_invocations: Arc::new(Mutex::new(HashSet::new())),
             session_lock: Mutex::new(()),
         }
     }
@@ -421,6 +428,7 @@ impl CodeModeHostClient {
         let state_for_session = self.state.clone();
         let cells_for_session = self.active_cells.clone();
         let inflight_for_session = self.inflight_calls.clone();
+        let cancelled_for_session = self.cancelled_invocations.clone();
         let channel_for_ack = channel.clone();
         let notify_clone = opened_notify.clone();
         let res_clone = opened_result.clone();
@@ -441,6 +449,12 @@ impl CodeModeHostClient {
                                 inflight_for_session.lock().await.remove(&c.invocation_id)
                             {
                                 handle.abort();
+                            } else {
+                                let mut cancelled = cancelled_for_session.lock().await;
+                                if cancelled.len() >= 1024 {
+                                    cancelled.clear();
+                                }
+                                cancelled.insert(c.invocation_id);
                             }
                         }
                         Some(cm_pb::session_event::Event::Notification(n)) => {
@@ -485,37 +499,61 @@ impl CodeModeHostClient {
                     notify_clone.notify_one();
                 }
             }
-            state_for_session.lock().await.session_id = None;
-            cells_for_session.lock().await.clear();
+            if let Some(sid) = current_session_id {
+                let mut st = state_for_session.lock().await;
+                if st.session_id.as_deref() == Some(sid.as_str()) {
+                    st.session_id = None;
+                    cells_for_session.lock().await.clear();
+                }
+            }
         });
 
-        tokio::time::timeout(Duration::from_secs(15), opened_notify.notified())
+        if tokio::time::timeout(Duration::from_secs(15), opened_notify.notified())
             .await
-            .map_err(|_| "Timed out waiting for SessionOpened".to_owned())?;
+            .is_err()
+        {
+            session_task.abort();
+            return Err("Timed out waiting for SessionOpened".to_owned());
+        }
 
-        let (session_id, supports_catalog_revision) = opened_result
-            .lock()
-            .await
-            .take()
-            .ok_or_else(|| "Missing SessionOpened result".to_owned())??;
+        let (session_id, supports_catalog_revision) = match opened_result.lock().await.take() {
+            Some(Ok(v)) => v,
+            Some(Err(e)) => {
+                session_task.abort();
+                return Err(e);
+            }
+            None => {
+                session_task.abort();
+                return Err("Missing SessionOpened result".to_owned());
+            }
+        };
 
         let mut sub_client = GrpcCodeModeClient::new(channel.clone())
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
-        let mut tool_stream = sub_client
+        let mut tool_stream = match sub_client
             .subscribe_to_tool_calls(cm_pb::SubscribeToToolCallsRequest {
                 session_id: session_id.clone(),
                 tool_names: vec![],
                 heartbeat_interval_s: 15,
             })
             .await
-            .map_err(|e| format!("SubscribeToToolCalls failed: {e}"))?
-            .into_inner();
+        {
+            Ok(resp) => resp.into_inner(),
+            Err(e) => {
+                session_task.abort();
+                return Err(format!("SubscribeToToolCalls failed: {e}"));
+            }
+        };
 
         let pm = self.process_manager.clone();
         let workdir = self.workdir.clone();
         let ch_for_tools = channel.clone();
         let inflight_map = self.inflight_calls.clone();
+        let cancelled_map = self.cancelled_invocations.clone();
+        let state_for_sub = self.state.clone();
+        let cells_for_sub = self.active_cells.clone();
+        let sub_session_id = session_id.clone();
 
         let subscribe_task = tokio::spawn(async move {
             while let Ok(Some(call)) = tool_stream.message().await {
@@ -523,16 +561,26 @@ impl CodeModeHostClient {
                     continue;
                 }
                 let inv_id = call.invocation_id.clone();
+                if cancelled_map.lock().await.remove(&inv_id) {
+                    continue;
+                }
                 let pm_c = pm.clone();
                 let wd_c = workdir.clone();
                 let ch_c = ch_for_tools.clone();
                 let inflight_c = inflight_map.clone();
                 let inv_id_done = inv_id.clone();
+                let mut guard = inflight_map.lock().await;
                 let handle = tokio::spawn(async move {
                     handle_nested_tool_call(call, pm_c, wd_c, ch_c).await;
                     inflight_c.lock().await.remove(&inv_id_done);
                 });
-                inflight_map.lock().await.insert(inv_id, handle);
+                guard.insert(inv_id, handle);
+            }
+            warn!("SubscribeToToolCalls stream ended for session {sub_session_id}");
+            let mut st = state_for_sub.lock().await;
+            if st.session_id.as_deref() == Some(sub_session_id.as_str()) {
+                st.session_id = None;
+                cells_for_sub.lock().await.clear();
             }
         });
 
@@ -580,13 +628,14 @@ impl CodeModeHostClient {
         max_output_tokens: Option<u32>,
     ) -> Result<FormattedOutcome, String> {
         let parsed = parse_exec_source(code).map_err(|e| e.to_string())?;
-        let effective_yield_ms = yield_time_ms
-            .or(parsed.yield_time_ms)
+        let effective_yield_ms = parsed
+            .yield_time_ms
+            .or(yield_time_ms)
             .unwrap_or(DEFAULT_CELL_YIELD_TIME_MS)
             .min(self.max_yield_time_ms);
-        let requested_tokens = max_output_tokens
-            .filter(|&v| v > 0)
-            .or(parsed.max_output_tokens)
+        let requested_tokens = parsed
+            .max_output_tokens
+            .or(max_output_tokens.filter(|&v| v > 0))
             .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
         let effective_max_tokens = requested_tokens.max(100);
 
@@ -706,7 +755,7 @@ impl CodeModeHostClient {
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
 
-        let resp = if terminate {
+        let rpc_res = if terminate {
             client
                 .terminate(cm_pb::TerminateRequest {
                     session_id,
@@ -715,8 +764,6 @@ impl CodeModeHostClient {
                     discard_output: false,
                 })
                 .await
-                .map_err(|e| format!("Terminate failed: {e}"))?
-                .into_inner()
         } else {
             let effective_yield_ms = yield_time_ms
                 .unwrap_or(DEFAULT_CELL_YIELD_TIME_MS)
@@ -730,8 +777,21 @@ impl CodeModeHostClient {
                     max_output_tokens: Some(u64::from(effective_max_tokens)),
                 })
                 .await
-                .map_err(|e| format!("Wait failed: {e}"))?
-                .into_inner()
+        };
+
+        let resp = match rpc_res {
+            Ok(r) => r.into_inner(),
+            Err(status) => {
+                if matches!(
+                    status.code(),
+                    tonic::Code::NotFound | tonic::Code::Unavailable
+                ) {
+                    let _guard = self.session_lock.lock().await;
+                    self.state.lock().await.session_id = None;
+                    self.active_cells.lock().await.clear();
+                }
+                return Err(format!("Wait/Terminate failed: {status}"));
+            }
         };
 
         let formatted = match resp.state {
@@ -758,6 +818,7 @@ impl CodeModeHostClient {
         for (_, h) in self.inflight_calls.lock().await.drain() {
             h.abort();
         }
+        self.cancelled_invocations.lock().await.clear();
         let mut st = self.state.lock().await;
         if let Some(h) = st.subscribe_task.take() {
             h.abort();

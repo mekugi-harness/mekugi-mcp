@@ -42,7 +42,6 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-exclude = ["src/mekugi_mcp/proto/*_pb2*.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "PIE"]
