@@ -106,7 +106,7 @@ jobs:
             docker exec -i "$cid" curl -fsS -H 'Content-Type: application/json' \
               --data-binary @- http://127.0.0.1:8080/exec |
             jq -e 'tostring | contains("devbox-exec-ok")' >/dev/null
-          docker exec "$cid" bash -ec 'go version; rustc --version; mold --version;
+          docker exec "$cid" bash -elc 'go version; rustc --version; mold --version;
             agent-browser --version; scriptc --version;
             cargo new -q --vcs none /tmp/rust-smoke; cd /tmp/rust-smoke;
             cargo run --quiet --offline | grep -Fx "Hello, world!"'
