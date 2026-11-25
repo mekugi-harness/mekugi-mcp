@@ -3,6 +3,7 @@ mod code_mode_client;
 mod docs;
 mod pragma;
 mod pty_manager;
+mod systemd;
 
 use std::env;
 use std::fs;
@@ -396,7 +397,11 @@ async fn main() {
     let grpc_listen = env::var("DEVBOX_GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:50052".into());
     let http_host = env::var("DEVBOX_HOST").unwrap_or_else(|_| "0.0.0.0".into());
     let http_port = env::var("DEVBOX_PORT").unwrap_or_else(|_| "8080".into());
-    let http_listen = format!("{http_host}:{http_port}");
+    let http_listen = if http_host.trim().is_empty() || http_port.trim().is_empty() {
+        None
+    } else {
+        Some(format!("{}:{}", http_host.trim(), http_port.trim()))
+    };
 
     if let Err(e) = fs::create_dir_all(&workdir) {
         error!("Failed to create workdir {}: {e}", workdir.display());
@@ -450,47 +455,90 @@ async fn main() {
         None
     };
 
-    let router = Router::new()
-        .route("/health", get(http_health))
-        .route("/exec", post(http_exec))
-        .route("/wait", post(http_wait))
-        .route("/code-mode-docs", get(http_docs))
-        .with_state(state);
+    let http_server = if let Some(addr) = http_listen {
+        let router = Router::new()
+            .route("/health", get(http_health))
+            .route("/exec", post(http_exec))
+            .route("/wait", post(http_wait))
+            .route("/code-mode-docs", get(http_docs))
+            .with_state(state);
 
-    let http_listener = match tokio::net::TcpListener::bind(&http_listen).await {
-        Ok(l) => {
-            info!("Rust devbox HTTP server listening on {}", l.local_addr().unwrap());
-            l
-        }
-        Err(e) => {
-            error!("Failed to bind HTTP server on {http_listen}: {e}");
-            if let Some(srv) = grpc_server {
-                srv.stop().await;
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                let local_addr = listener.local_addr().unwrap();
+                info!("Rust devbox HTTP server listening on {local_addr}");
+                let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+                let handle = tokio::spawn(async move {
+                    let _ = axum::serve(listener, router)
+                        .with_graceful_shutdown(async move {
+                            let _ = shutdown_rx.await;
+                        })
+                        .await;
+                });
+                Some((local_addr, shutdown_tx, handle))
             }
-            client.close().await;
-            supervisor.stop().await;
-            std::process::exit(1);
+            Err(e) => {
+                error!("Failed to bind HTTP server on {addr}: {e}");
+                if let Some(srv) = grpc_server {
+                    srv.stop().await;
+                }
+                client.close().await;
+                supervisor.stop().await;
+                std::process::exit(1);
+            }
         }
+    } else {
+        None
     };
 
-    let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let http_handle = tokio::spawn(async move {
-        let _ = axum::serve(http_listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = http_shutdown_rx.await;
-            })
-            .await;
+    if grpc_server.is_none() && http_server.is_none() {
+        error!("At least one of DEVBOX_GRPC_ADDR or DEVBOX_HOST/DEVBOX_PORT must be enabled");
+        client.close().await;
+        supervisor.stop().await;
+        std::process::exit(1);
+    }
+
+    let mut endpoints = Vec::new();
+    if let Some(srv) = &grpc_server {
+        endpoints.push(format!("gRPC {}", srv.local_addr));
+    }
+    if let Some((addr, _, _)) = &http_server {
+        endpoints.push(format!("HTTP {addr}"));
+    }
+    systemd::notify(&format!(
+        "READY=1\nSTATUS=Listening on {}",
+        endpoints.join(", ")
+    ));
+
+    let watchdog_handle = systemd::watchdog_interval().map(|interval| {
+        let client = client.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                if client.is_host_running().await {
+                    systemd::notify("WATCHDOG=1");
+                } else {
+                    warn!("codex-code-mode-host is not running; skipping systemd watchdog ping");
+                }
+            }
+        })
     });
 
     shutdown_signal().await;
-    let _ = http_shutdown_tx.send(());
+    if let Some(handle) = watchdog_handle {
+        handle.abort();
+    }
+    systemd::notify("STOPPING=1\nSTATUS=Shutting down");
 
     let http_drain = async {
-        if tokio::time::timeout(std::time::Duration::from_secs(5), http_handle)
-            .await
-            .is_err()
-        {
-            warn!("HTTP server drain timed out after 5s");
+        if let Some((_, shutdown_tx, handle)) = http_server {
+            let _ = shutdown_tx.send(());
+            if tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .is_err()
+            {
+                warn!("HTTP server drain timed out after 5s");
+            }
         }
     };
     let grpc_drain = async {

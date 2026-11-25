@@ -82,6 +82,46 @@ To connect multiple devboxes from one MCP server, set `DEVBOXES_JSON` or mount a
 
 Supported target schemes: `grpc://`, `grpcs://` (native TLS + optional `ca_cert_path`), `http://`, and `https://`.
 
+### Running on a VPS with systemd (On-Demand Direct Host Control)
+
+Instead of running `mekugi-devbox` in Docker, you can install it directly on a Linux VPS as a **systemd** service (`Type=notify` with `sd_notify` readiness, watchdog heartbeat, and `KillMode=control-group` so stopping the unit cleanly terminates all agent shells).
+
+By default the installer leaves the service **disabled at boot** so you can toggle direct agent control on and off whenever you want:
+
+```bash
+# System service (runs as root by default, or pass --run-as <user>)
+sudo ./systemd/install.sh
+
+# Or user-level systemd service (no root required)
+./systemd/install.sh --user
+```
+
+The installer builds `mekugi-devbox` (or pass `--bin <path>`), downloads `codex-code-mode-host` and extracts `code-mode-docs.json`, creates a `chmod 600` env file with a generated `DEVBOX_INTERNAL_TOKEN`, and installs the unit file.
+
+Toggle access on demand:
+
+```bash
+sudo systemctl start mekugi-devbox    # allow agent control
+sudo systemctl stop mekugi-devbox     # revoke access and reap all agent shells
+sudo systemctl status mekugi-devbox
+sudo journalctl -u mekugi-devbox -f
+```
+
+(Pass `--enable` to `install.sh` or run `sudo systemctl enable --now mekugi-devbox` if you want it to start on boot.)
+
+Then add the VPS to your MCP server's `DEVBOXES_JSON` (bind `DEVBOX_GRPC_ADDR` in `/etc/mekugi-devbox/env` to your Tailscale/WireGuard IP or `127.0.0.1:50052` behind an SSH tunnel — avoid exposing `0.0.0.0` on a public VPS):
+
+```json
+{
+  "name": "vps",
+  "target": "grpc://100.x.y.z:50052",
+  "token_env": "DEVBOX_TOKEN_VPS",
+  "description": "Direct VPS host (systemd on-demand)"
+}
+```
+
+To remove the unit and installed binaries later, run `sudo ./systemd/install.sh --uninstall` (or add `--user`).
+
 To use Plane in the devbox, install a container-compatible `plane` binary at `~/.local/bin/plane` and the full skill at `~/.skills-mgr/skills/plane/SKILL.md` on the Docker host, then add the Compose override:
 ```bash
 docker compose -f docker-compose.yml -f docker/devbox/compose.plane.yml \
