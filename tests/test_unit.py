@@ -444,6 +444,7 @@ async def test_mcp_refreshes_tool_descriptions_after_devbox_recovers(
     monkeypatch.delenv("CODE_MODE_DOCS_PATH", raising=False)
     from mekugi_mcp import server as server_mod
 
+    monkeypatch.setattr(server_mod, "DOCS_RETRY_BACKOFF_S", 0.0)
     state: dict[str, tuple[str, str, str] | None] = {"live": None}
 
     async def _fake_fetch(**_kwargs: object) -> tuple[str, str, str] | None:
@@ -528,7 +529,15 @@ async def test_cluster_config_env_and_routing_errors(
     cfg_file = tmp_path / "boxes.json"
     cfg_file.write_text(json.dumps(boxes_cfg), encoding="utf-8")
 
+    monkeypatch.delenv("DEVBOXES_JSON", raising=False)
     monkeypatch.setenv("DEVBOXES_FILE", str(cfg_file))
+    monkeypatch.setenv("DEFAULT_BOX", "")
+    mcp_from_file_default = create_mcp_server(use_env_auth=False)
+    async with Client(mcp_from_file_default) as client:
+        listed_default = await client.call_tool("list_boxes", {})
+        payload_default = json.loads(listed_default.content[0].text)  # type: ignore[union-attr]
+        assert payload_default["default_box"] == "gpu-1"
+
     monkeypatch.setenv("DEFAULT_BOX", "local")
     mcp = create_mcp_server(use_env_auth=False)
     async with Client(mcp) as client:

@@ -1,10 +1,13 @@
-FROM python:3.14-slim AS wheel-builder
+FROM ubuntu:26.04 AS wheel-builder
 
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     curl \
     pkg-config \
+    python3 \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/root/.cargo/bin:${PATH}"
@@ -16,8 +19,12 @@ COPY proto ./proto
 COPY crates ./crates
 COPY src ./src
 
-RUN pip install --no-cache-dir "maturin>=1.7,<2.0" \
-    && maturin build --release --out /wheels
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/build/target \
+    python3 -m venv /tmp/build-venv \
+    && /tmp/build-venv/bin/pip install --no-cache-dir "maturin>=1.7,<2.0" \
+    && /tmp/build-venv/bin/maturin build --release --locked -i /usr/bin/python3 --out /wheels
 
 FROM ubuntu:26.04
 

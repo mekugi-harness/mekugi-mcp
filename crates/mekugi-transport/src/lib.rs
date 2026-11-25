@@ -93,17 +93,7 @@ Script running with cell ID cell-77".into(),
                 session_id: Some("sess-1".into()),
                 active_cells: 1,
                 active_shells: 2,
-            })
-        }
-
-        async fn get_health(&self) -> Result<pb::GetHealthResponse, Status> {
-            Ok(pb::GetHealthResponse {
-                status: "ok".into(),
-                session_id: Some("sess-1".into()),
-                workdir: "/workspace".into(),
                 error: None,
-                active_cells: 1,
-                active_shells: 2,
             })
         }
 
@@ -138,11 +128,14 @@ Script running with cell ID cell-77".into(),
         assert!(parse_cell_route("gpu-1:c123", Some("local"), "local").is_err());
 
         let rewritten = rewrite_cell_id_in_text(
-            "Script running with cell ID cell-77",
-            "cell-77",
-            "gpu-1:cell-77",
+            "Wall time: 0.0520 seconds\nScript running with cell ID 2\nMore output. Call wait with cell_id='2'.",
+            "2",
+            "beta:2",
         );
-        assert_eq!(rewritten, "Script running with cell ID gpu-1:cell-77");
+        assert_eq!(
+            rewritten,
+            "Wall time: 0.0520 seconds\nScript running with cell ID beta:2\nMore output. Call wait with cell_id='beta:2'."
+        );
     }
 
     #[test]
@@ -150,7 +143,7 @@ Script running with cell ID cell-77".into(),
         let raw = r#"{
             "default_box": "gpu-1",
             "boxes": [
-                {"name": "local", "target": "grpc://127.0.0.1:50052"},
+                {"name": "local", "target": "GRPC://127.0.0.1:50052"},
                 {"name": "gpu-1", "target": "grpcs://gpu-1.example.com:50052", "pool_size": 2}
             ]
         }"#;
@@ -160,6 +153,7 @@ Script running with cell ID cell-77".into(),
             .unwrap();
         assert_eq!(validated.default_box, "gpu-1");
         assert_eq!(validated.boxes.len(), 2);
+        assert_eq!(validated.boxes[0].target, "grpc://127.0.0.1:50052");
 
         let bad_name = r#"[{"name": "bad:name", "target": "grpc://127.0.0.1:50052"}]"#;
         assert!(
@@ -168,6 +162,20 @@ Script running with cell ID cell-77".into(),
                 .validate(None)
                 .is_err()
         );
+
+        // Explicit token_env must fail closed instead of falling back to shared secret
+        let missing_env = BoxConfig {
+            name: "remote".into(),
+            target: "grpc://127.0.0.1:50052".into(),
+            token: None,
+            token_env: Some("MEKUGI_DEFINITELY_UNSET_TOKEN_ENV_12345".into()),
+            description: None,
+            labels: BTreeMap::new(),
+            pool_size: None,
+            max_yield_time_ms: None,
+            ca_cert_path: None,
+        };
+        assert!(missing_env.resolve_token(Some("shared-secret")).is_err());
     }
 
     #[tokio::test]

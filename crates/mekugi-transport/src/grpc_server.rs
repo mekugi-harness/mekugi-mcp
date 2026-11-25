@@ -22,7 +22,6 @@ pub trait DevboxBackend: Send + Sync + 'static {
     async fn exec(&self, req: pb::ExecRequest) -> Result<pb::ExecResponse, Status>;
     async fn wait(&self, req: pb::WaitRequest) -> Result<pb::WaitResponse, Status>;
     async fn get_info(&self) -> Result<pb::GetInfoResponse, Status>;
-    async fn get_health(&self) -> Result<pb::GetHealthResponse, Status>;
     async fn get_code_mode_docs(&self) -> Result<pb::GetCodeModeDocsResponse, Status>;
 }
 
@@ -79,15 +78,6 @@ impl<B: DevboxBackend> DevboxAgent for DevboxAgentService<B> {
     ) -> Result<Response<pb::GetInfoResponse>, Status> {
         self.authorize(&request)?;
         let resp = self.backend.get_info().await?;
-        Ok(Response::new(resp))
-    }
-
-    async fn get_health(
-        &self,
-        request: Request<pb::GetHealthRequest>,
-    ) -> Result<Response<pb::GetHealthResponse>, Status> {
-        let resp = self.backend.get_health().await?;
-        let _ = request;
         Ok(Response::new(resp))
     }
 
@@ -156,6 +146,12 @@ impl RunningGrpcServer {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        let _ = self.join_handle.await;
+        if tokio::time::timeout(Duration::from_secs(5), &mut self.join_handle)
+            .await
+            .is_err()
+        {
+            self.join_handle.abort();
+            let _ = self.join_handle.await;
+        }
     }
 }

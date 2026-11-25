@@ -61,24 +61,50 @@ pub fn parse_cell_route(
     Ok((target_box.to_owned(), trimmed_cell.to_owned()))
 }
 
-/// Rewrite raw cell_id occurrences inside Mekugi's formatted text output
-/// so the LLM passes the routable namespaced ID back to wait.
+/// Rewrite raw cell_id occurrences inside Mekugi's known cell-ID anchors
+/// ("cell ID <id>", "Cell <id> ", "cell_id='<id>'", "cell_id="<id>"")
+/// so short/numeric IDs (e.g. "2") never corrupt timestamps or stdout.
 pub fn rewrite_cell_id_in_text(text: &str, raw_cell_id: &str, namespaced_cell_id: &str) -> String {
     if raw_cell_id.is_empty() || raw_cell_id == namespaced_cell_id {
         return text.to_owned();
     }
-    let prefix = namespaced_cell_id.strip_suffix(raw_cell_id).unwrap_or("");
+    let mut result = text.to_owned();
+    for anchor in ["cell ID ", "Cell ", "cell_id='", "cell_id=\""] {
+        result = rewrite_after_anchor(&result, anchor, raw_cell_id, namespaced_cell_id);
+    }
+    result
+}
+
+fn is_cell_id_boundary(b: u8) -> bool {
+    matches!(
+        b,
+        b' ' | b'\n' | b'\r' | b'\t' | b')' | b'\'' | b'"' | b'.' | b',' | b';'
+    )
+}
+
+fn rewrite_after_anchor(
+    text: &str,
+    anchor: &str,
+    raw_cell_id: &str,
+    namespaced_cell_id: &str,
+) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(pos) = rest.find(raw_cell_id) {
-        let before = &rest[..pos];
-        out.push_str(before);
-        if !prefix.is_empty() && out.ends_with(prefix) {
-            out.push_str(raw_cell_id);
-        } else {
-            out.push_str(namespaced_cell_id);
+    while let Some(pos) = rest.find(anchor) {
+        let after_anchor = pos + anchor.len();
+        out.push_str(&rest[..after_anchor]);
+        rest = &rest[after_anchor..];
+
+        if let Some(tail) = rest.strip_prefix(raw_cell_id) {
+            let boundary_ok = tail
+                .as_bytes()
+                .first()
+                .is_none_or(|b| is_cell_id_boundary(*b));
+            if boundary_ok {
+                out.push_str(namespaced_cell_id);
+                rest = tail;
+            }
         }
-        rest = &rest[pos + raw_cell_id.len()..];
     }
     out.push_str(rest);
     out

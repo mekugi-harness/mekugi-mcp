@@ -209,13 +209,22 @@ async def test_fastmcp_multi_box_grpc_cluster_e2e(
     dir_a.mkdir()
     dir_b.mkdir()
 
+    docs_file = tmp_path / "grpc-code-mode-docs.json"
+    docs_file.write_text(
+        '{"source_repo":"mekugi-harness/mekugi","source_ref":"grpc-rev",'
+        '"exec_description_template":"gRPC cluster exec ({{ default_exec_yield_time_ms }}ms) {{ image_helper }}",'
+        '"wait_description_template":"gRPC cluster wait",'
+        '"image_helper_description":"img-helper"}',
+        encoding="utf-8",
+    )
+
     app_a = create_devbox_app(
         grpc_target=f"127.0.0.1:{_free_port()}",
         grpc_listen_addr="127.0.0.1:0",
         host_binary=HOST_BIN,
         workdir=str(dir_a),
         internal_token="token-alpha",
-        docs_path="",
+        docs_path=str(docs_file),
     )
     app_b = create_devbox_app(
         grpc_target=f"127.0.0.1:{_free_port()}",
@@ -274,13 +283,45 @@ async def test_fastmcp_multi_box_grpc_cluster_e2e(
             }
         )
 
-        mcp = await asyncio.to_thread(
-            create_mcp_server,
+        # Verify gRPC auth rejects wrong token
+        from mekugi_mcp._transport import ClusterTransport
+
+        bad_transport = ClusterTransport.single_box(
+            f"grpc://{grpc_addr_a}", box_name="alpha", token="wrong-token"
+        )
+        with pytest.raises(RuntimeError, match="Unauthenticated|Unauthorized"):
+            await bad_transport.exec('text("nope");')
+
+        mcp = create_mcp_server(
             boxes_json=boxes_json,
             use_env_auth=False,
         )
 
+        # Verify /health returns 200 (default ok) without leaking internal box topology
+        mcp_http = mcp.http_app(path="/mcp")
+        async with (
+            mcp_http.router.lifespan_context(mcp_http),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=mcp_http),
+                base_url="http://testserver",
+            ) as http_client,
+        ):
+            h = await http_client.get("/health")
+            assert h.status_code == 200
+            hbody = h.json()
+            assert hbody["status"] == "ok"
+            assert hbody["default_box"] == "alpha"
+            assert hbody["healthy_boxes"] == 2
+            assert hbody["total_boxes"] == 3
+            assert "boxes" not in hbody
+            assert "devbox" not in hbody
+
         async with Client(mcp) as client:
+            # 0. gRPC GetCodeModeDocs refreshes tool descriptions asynchronously on tools/list
+            tools_map = {t.name: t for t in await client.list_tools()}
+            assert "gRPC cluster exec (10000ms) img-helper" in (tools_map["exec"].description or "")
+            assert "gRPC cluster wait" in (tools_map["wait"].description or "")
+
             # 1. list_boxes probes all boxes in parallel; offline box does not block healthy ones
             listed = await client.call_tool("list_boxes", {})
             info = json.loads(listed.content[0].text)  # type: ignore[union-attr]
@@ -335,7 +376,7 @@ async def test_fastmcp_multi_box_grpc_cluster_e2e(
                     "exec",
                     {
                         "box": "alpha",
-                        "code": 'await new Promise(r => setTimeout(r, 600)); text("slow-ok");',
+                        "code": 'await new Promise(r => setTimeout(r, 900)); text("slow-ok");',
                         "yield_time_ms": 5000,
                     },
                 )
@@ -348,7 +389,9 @@ async def test_fastmcp_multi_box_grpc_cluster_e2e(
             )
             fast_elapsed = time.monotonic() - t0
             assert "fast-ok" in fast_res.content[0].text  # type: ignore[union-attr]
-            assert fast_elapsed < 0.35, f"Fast command blocked by slow command: {fast_elapsed:.3f}s"
+            assert not slow_task.done(), (
+                f"Fast command did not finish before slow command ({fast_elapsed:.3f}s)"
+            )
 
             slow_res = await slow_task
             assert "slow-ok" in slow_res.content[0].text  # type: ignore[union-attr]

@@ -28,7 +28,7 @@ services:
         condition: service_healthy
     environment:
       DEVBOX_URL: ${DEVBOX_URL:-grpc://devbox:50052}
-      DEFAULT_BOX: ${DEFAULT_BOX:-local}
+      DEFAULT_BOX: ${DEFAULT_BOX:-}
       DEVBOXES_JSON: ${DEVBOXES_JSON:-}
       DEVBOXES_FILE: ${DEVBOXES_FILE:-}
       DEVBOX_INTERNAL_TOKEN: ${DEVBOX_INTERNAL_TOKEN:-${JWT_SIGNING_KEY:?Set JWT_SIGNING_KEY or DEVBOX_INTERNAL_TOKEN}}

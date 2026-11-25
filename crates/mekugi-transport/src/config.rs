@@ -6,6 +6,7 @@ use thiserror::Error;
 
 pub const DEFAULT_BOX_NAME: &str = "default";
 pub const DEFAULT_MAX_YIELD_TIME_MS: u32 = 45_000;
+pub const HARD_MAX_YIELD_TIME_MS: u32 = 300_000;
 pub const DEFAULT_GRPC_POOL_SIZE: usize = 1;
 pub const DEFAULT_HTTP_POOL_SIZE: usize = 16;
 
@@ -93,28 +94,39 @@ impl BoxConfig {
     pub fn effective_max_yield_time_ms(&self) -> u32 {
         self.max_yield_time_ms
             .unwrap_or(DEFAULT_MAX_YIELD_TIME_MS)
-            .clamp(1_000, DEFAULT_MAX_YIELD_TIME_MS)
+            .clamp(1_000, HARD_MAX_YIELD_TIME_MS)
     }
 
-    pub fn resolve_token(&self, fallback_token: Option<&str>) -> Option<String> {
+    pub fn resolve_token(&self, fallback_token: Option<&str>) -> Result<Option<String>, ConfigError> {
         if let Some(tok) = &self.token {
             let trimmed = tok.trim();
             if !trimmed.is_empty() {
-                return Some(trimmed.to_owned());
+                return Ok(Some(trimmed.to_owned()));
             }
         }
-        if let Some(env_name) = &self.token_env
-            && let Ok(val) = std::env::var(env_name)
-        {
-            let trimmed = val.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_owned());
+        if let Some(env_name) = &self.token_env {
+            let env_key = env_name.trim();
+            if !env_key.is_empty() {
+                let val = std::env::var(env_key).map_err(|_| {
+                    ConfigError::Invalid(format!(
+                        "box '{}' requires token_env '{}' which is not set",
+                        self.name, env_key
+                    ))
+                })?;
+                let trimmed = val.trim();
+                if trimmed.is_empty() {
+                    return Err(ConfigError::Invalid(format!(
+                        "box '{}' requires token_env '{}' which is empty",
+                        self.name, env_key
+                    )));
+                }
+                return Ok(Some(trimmed.to_owned()));
             }
         }
-        fallback_token
+        Ok(fallback_token
             .map(str::trim)
             .filter(|t| !t.is_empty())
-            .map(ToOwned::to_owned)
+            .map(ToOwned::to_owned))
     }
 }
 
@@ -221,6 +233,9 @@ impl ClusterConfig {
                 )));
             }
             let _ = box_cfg.scheme()?;
+            if let Some((scheme, rest)) = box_cfg.target.split_once("://") {
+                box_cfg.target = format!("{}://{rest}", scheme.to_ascii_lowercase());
+            }
         }
 
         let resolved_default = default_box_override

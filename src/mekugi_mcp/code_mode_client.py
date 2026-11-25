@@ -156,7 +156,7 @@ class CodeModeHostClient:
 
     @property
     def active_shell_count(self) -> int:
-        return len(self.process_manager._sessions)
+        return self.process_manager.active_session_count
 
     async def start(self) -> None:
         """Connect to codex-code-mode-host and open a session."""
@@ -224,6 +224,7 @@ class CodeModeHostClient:
                     opened_event.set()
             finally:
                 self._session_id = None
+                self._active_cells.clear()
 
         self._session_task = asyncio.create_task(_session_loop())
         await asyncio.wait_for(opened_event.wait(), timeout=15.0)
@@ -361,11 +362,12 @@ class CodeModeHostClient:
         effective_yield_ms = self._clamp_yield_ms(
             yield_time_ms if yield_time_ms is not None else parsed.yield_time_ms
         )
-        effective_max_tokens = (
+        requested_tokens = (
             int(max_output_tokens)
-            if max_output_tokens is not None
+            if (max_output_tokens is not None and int(max_output_tokens) > 0)
             else (parsed.max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS)
         )
+        effective_max_tokens = max(100, requested_tokens)
 
         for attempt in range(2):
             session_id = await self._ensure_session()

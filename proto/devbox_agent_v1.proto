@@ -9,7 +9,6 @@ service DevboxAgent {
   rpc Exec(ExecRequest) returns (ExecResponse);
   rpc Wait(WaitRequest) returns (WaitResponse);
   rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
-  rpc GetHealth(GetHealthRequest) returns (GetHealthResponse);
   rpc GetCodeModeDocs(GetCodeModeDocsRequest) returns (GetCodeModeDocsResponse);
 }
 
@@ -53,17 +52,7 @@ message GetInfoResponse {
   optional string session_id = 6;
   uint32 active_cells = 7;
   uint32 active_shells = 8;
-}
-
-message GetHealthRequest {}
-
-message GetHealthResponse {
-  string status = 1;
-  optional string session_id = 2;
-  string workdir = 3;
-  optional string error = 4;
-  uint32 active_cells = 5;
-  uint32 active_shells = 6;
+  optional string error = 9;
 }
 
 message GetCodeModeDocsRequest {}

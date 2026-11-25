@@ -111,10 +111,15 @@ impl GrpcPool {
         scheme: TransportScheme,
         token: Option<&str>,
     ) -> Result<Self, TransportError> {
+        let rest = cfg
+            .target
+            .split_once("://")
+            .map(|(_, r)| r)
+            .unwrap_or(&cfg.target);
         let endpoint_uri = if scheme == TransportScheme::Grpcs {
-            cfg.target.replacen("grpcs://", "https://", 1)
+            format!("https://{rest}")
         } else {
-            cfg.target.replacen("grpc://", "http://", 1)
+            format!("http://{rest}")
         };
 
         let pool_size = cfg.effective_pool_size(scheme);
@@ -298,7 +303,7 @@ impl BoxNode {
         let scheme = config.scheme()?;
         let pool_size = config.effective_pool_size(scheme);
         let max_yield_time_ms = config.effective_max_yield_time_ms();
-        let token = config.resolve_token(fallback_token);
+        let token = config.resolve_token(fallback_token)?;
 
         let transport = if scheme.is_grpc() {
             BoxTransport::Grpc(GrpcPool::connect_lazy(&config, scheme, token.as_deref())?)
@@ -376,20 +381,34 @@ impl BoxNode {
                     })?;
 
                 let status = resp.status();
-                let parsed: HttpExecResponse =
-                    resp.json().await.map_err(|e| TransportError::Http {
-                        box_name: self.config.name.clone(),
-                        message: format!("invalid JSON response ({status}): {e}"),
-                    })?;
+                let raw_bytes = resp.bytes().await.map_err(|e| TransportError::Http {
+                    box_name: self.config.name.clone(),
+                    message: e.to_string(),
+                })?;
                 if !status.is_success() {
+                    let msg = serde_json::from_slice::<HttpExecResponse>(&raw_bytes)
+                        .ok()
+                        .and_then(|p| p.error)
+                        .unwrap_or_else(|| {
+                            let snippet = String::from_utf8_lossy(&raw_bytes);
+                            let trimmed = snippet.trim();
+                            if trimmed.is_empty() {
+                                format!("Devbox error ({status})")
+                            } else {
+                                trimmed.chars().take(240).collect()
+                            }
+                        });
                     return Err(TransportError::Remote {
                         box_name: self.config.name.clone(),
                         status: status.as_u16().to_string(),
-                        message: parsed
-                            .error
-                            .unwrap_or_else(|| format!("Devbox error ({status})")),
+                        message: msg,
                     });
                 }
+                let parsed: HttpExecResponse =
+                    serde_json::from_slice(&raw_bytes).map_err(|e| TransportError::Http {
+                        box_name: self.config.name.clone(),
+                        message: format!("invalid JSON response ({status}): {e}"),
+                    })?;
                 Ok(ExecOutcome {
                     box_name: self.config.name.clone(),
                     cell_id: parsed.cell_id,
@@ -457,20 +476,34 @@ impl BoxNode {
                     })?;
 
                 let status = resp.status();
-                let parsed: HttpExecResponse =
-                    resp.json().await.map_err(|e| TransportError::Http {
-                        box_name: self.config.name.clone(),
-                        message: format!("invalid JSON response ({status}): {e}"),
-                    })?;
+                let raw_bytes = resp.bytes().await.map_err(|e| TransportError::Http {
+                    box_name: self.config.name.clone(),
+                    message: e.to_string(),
+                })?;
                 if !status.is_success() {
+                    let msg = serde_json::from_slice::<HttpExecResponse>(&raw_bytes)
+                        .ok()
+                        .and_then(|p| p.error)
+                        .unwrap_or_else(|| {
+                            let snippet = String::from_utf8_lossy(&raw_bytes);
+                            let trimmed = snippet.trim();
+                            if trimmed.is_empty() {
+                                format!("Devbox error ({status})")
+                            } else {
+                                trimmed.chars().take(240).collect()
+                            }
+                        });
                     return Err(TransportError::Remote {
                         box_name: self.config.name.clone(),
                         status: status.as_u16().to_string(),
-                        message: parsed
-                            .error
-                            .unwrap_or_else(|| format!("Devbox error ({status})")),
+                        message: msg,
                     });
                 }
+                let parsed: HttpExecResponse =
+                    serde_json::from_slice(&raw_bytes).map_err(|e| TransportError::Http {
+                        box_name: self.config.name.clone(),
+                        message: format!("invalid JSON response ({status}): {e}"),
+                    })?;
                 Ok(ExecOutcome {
                     box_name: self.config.name.clone(),
                     cell_id: parsed.cell_id,
@@ -572,7 +605,7 @@ impl BoxNode {
                     session_id: info.session_id,
                     active_cells: info.active_cells,
                     active_shells: info.active_shells,
-                    error: None,
+                    error: info.error,
                 })
             }
             BoxTransport::Http(http) => {
@@ -587,20 +620,48 @@ impl BoxNode {
                         message: e.to_string(),
                     })?;
                 let status_code = resp.status();
-                let body: HttpHealthResponse =
-                    resp.json().await.map_err(|e| TransportError::Http {
+                let raw_bytes = resp.bytes().await.map_err(|e| TransportError::Http {
+                    box_name: self.config.name.clone(),
+                    message: e.to_string(),
+                })?;
+                let parsed = serde_json::from_slice::<HttpHealthResponse>(&raw_bytes);
+                if !status_code.is_success() {
+                    if status_code == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                        && let Ok(ref body) = parsed
+                        && body.status == "degraded"
+                    {
+                        return Ok(BoxInfo {
+                            status: body.status.clone(),
+                            hostname: body.hostname.clone(),
+                            os: body.os.clone(),
+                            arch: body.arch.clone(),
+                            workdir: body.workdir.clone(),
+                            session_id: body.session_id.clone(),
+                            active_cells: body.active_cells,
+                            active_shells: body.active_shells,
+                            error: body.error.clone(),
+                        });
+                    }
+                    let msg = parsed
+                        .ok()
+                        .and_then(|b| b.error)
+                        .unwrap_or_else(|| format!("Health check failed ({status_code})"));
+                    return Err(TransportError::Remote {
                         box_name: self.config.name.clone(),
-                        message: format!("invalid health JSON ({status_code}): {e}"),
-                    })?;
-                let status_str = if !body.status.is_empty() {
-                    body.status
-                } else if status_code.is_success() {
-                    "ok".to_owned()
-                } else {
-                    "degraded".to_owned()
-                };
+                        status: status_code.as_u16().to_string(),
+                        message: msg,
+                    });
+                }
+                let body = parsed.map_err(|e| TransportError::Http {
+                    box_name: self.config.name.clone(),
+                    message: format!("invalid health JSON ({status_code}): {e}"),
+                })?;
                 Ok(BoxInfo {
-                    status: status_str,
+                    status: if body.status.is_empty() {
+                        "ok".to_owned()
+                    } else {
+                        body.status
+                    },
                     hostname: body.hostname,
                     os: body.os,
                     arch: body.arch,
@@ -622,8 +683,8 @@ impl BoxNode {
             BoxTransport::Grpc(pool) => {
                 let mut client = pool.next_client();
                 let req = pool.build_request(pb::GetCodeModeDocsRequest {}, timeout);
-                match client.get_code_mode_docs(req).await {
-                    Ok(resp) => {
+                match tokio::time::timeout(timeout, client.get_code_mode_docs(req)).await {
+                    Ok(Ok(resp)) => {
                         let d = resp.into_inner();
                         Ok(Some(CodeModeDocs {
                             source_repo: d.source_repo,
@@ -633,10 +694,14 @@ impl BoxNode {
                             image_helper_description: d.image_helper_description,
                         }))
                     }
-                    Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
-                    Err(status) => Err(TransportError::Grpc {
+                    Ok(Err(status)) if status.code() == tonic::Code::NotFound => Ok(None),
+                    Ok(Err(status)) => Err(TransportError::Grpc {
                         box_name: self.config.name.clone(),
                         message: format!("{}: {}", status.code(), status.message()),
+                    }),
+                    Err(_) => Err(TransportError::Timeout {
+                        box_name: self.config.name.clone(),
+                        timeout_ms: timeout.as_millis() as u64,
                     }),
                 }
             }

@@ -38,6 +38,7 @@ from mekugi_mcp.schema_sanitizer import GeminiSchemaSanitizerMiddleware
 logger = logging.getLogger(__name__)
 
 DOCS_REFRESH_TTL_S = 30.0
+DOCS_RETRY_BACKOFF_S = 10.0
 
 SERVER_INSTRUCTIONS = """You are connected to one or more persistent Linux devboxes running Mekugi's V8 code-mode runtime (`codex-code-mode-host`).
 Use `list_boxes` to inspect available devboxes, their health, labels, and default selection.
@@ -108,10 +109,12 @@ def build_cluster_transport(
             fallback_token=resolved_token,
         )
 
-    fallback_url = os.environ.get("DEVBOX_URL", "grpc://devbox:50052").rstrip("/")
+    fallback_url = (
+        os.environ.get("DEVBOX_URL", "").strip() or "grpc://devbox:50052"
+    ).rstrip("/")
     return ClusterTransport.single_box(
         fallback_url,
-        box_name=resolved_default,
+        box_name=resolved_default or "local",
         token=resolved_token,
     )
 
@@ -182,14 +185,13 @@ def create_mcp_server(
     static_docs_path = docs_path or os.environ.get("CODE_MODE_DOCS_PATH", "").strip() or None
     exec_description, wait_description, docs_source_ref = resolve_mcp_tool_descriptions(
         docs_path=static_docs_path,
-        cluster_transport=transport,
         default_exec_yield_time_ms=DEFAULT_CELL_YIELD_TIME_MS,
     )
     docs_state: dict[str, Any] = {
         "exec": exec_description,
         "wait": wait_description,
         "ref": docs_source_ref,
-        "fetched_at": time.monotonic() if docs_source_ref is not None else 0.0,
+        "last_attempt_at": time.monotonic() if docs_source_ref is not None else 0.0,
     }
 
     class _LiveCodeModeDocsMiddleware(Middleware):
@@ -201,18 +203,19 @@ def create_mcp_server(
             call_next: CallNext[Any, Sequence[Tool]],
         ) -> Sequence[Tool]:
             now = time.monotonic()
+            elapsed = now - float(docs_state["last_attempt_at"])
+            retry_interval = DOCS_REFRESH_TTL_S if docs_state["ref"] is not None else DOCS_RETRY_BACKOFF_S
             should_refresh = static_docs_path is None and (
-                docs_state["ref"] is None
-                or (now - float(docs_state["fetched_at"])) >= DOCS_REFRESH_TTL_S
+                docs_state["last_attempt_at"] == 0.0 or elapsed >= retry_interval
             )
             if should_refresh:
                 refreshed = await fetch_devbox_tool_descriptions(
                     cluster_transport=transport,
                     default_exec_yield_time_ms=DEFAULT_CELL_YIELD_TIME_MS,
                 )
+                docs_state["last_attempt_at"] = time.monotonic()
                 if refreshed is not None:
                     docs_state["exec"], docs_state["wait"], docs_state["ref"] = refreshed
-                    docs_state["fetched_at"] = now
             tools = await call_next(context)
             updated: list[Tool] = []
             for tool in tools:
@@ -235,22 +238,21 @@ def create_mcp_server(
         try:
             cluster_health = await transport.health_all(probe_timeout_ms=2_000)
             status_code = 200 if cluster_health["status"] == "ok" else 503
-            default_entry = next(
-                (b for b in cluster_health["boxes"] if b.get("is_default")),
-                None,
-            )
+            boxes = cluster_health["boxes"]
+            healthy_boxes = sum(1 for b in boxes if b.get("status") == "ok")
             return JSONResponse(
                 {
                     "status": cluster_health["status"],
                     "default_box": cluster_health["default_box"],
                     "code_mode_docs_ref": docs_state["ref"],
-                    "devbox": default_entry,
-                    "boxes": cluster_health["boxes"],
+                    "healthy_boxes": healthy_boxes,
+                    "total_boxes": len(boxes),
                 },
                 status_code=status_code,
             )
         except Exception as exc:
-            return JSONResponse({"status": "degraded", "error": str(exc)}, status_code=503)
+            logger.warning("Health probe failed: %s", exc)
+            return JSONResponse({"status": "degraded"}, status_code=503)
 
     @mcp.tool(
         name="exec",

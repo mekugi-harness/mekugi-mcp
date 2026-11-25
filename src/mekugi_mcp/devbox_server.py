@@ -147,6 +147,20 @@ def create_devbox_app(
         ensure_host_running=supervisor.ensure_running,
     )
 
+    def _status_payload() -> dict[str, Any]:
+        running = supervisor.is_running
+        return {
+            "status": "ok" if running else "degraded",
+            "hostname": host_hostname,
+            "os": host_os,
+            "arch": host_arch,
+            "workdir": cwd,
+            "session_id": client.session_id,
+            "active_cells": client.active_cell_count,
+            "active_shells": client.active_shell_count,
+            "error": None if running else "codex-code-mode-host is not running",
+        }
+
     class _DevboxGrpcHandler:
         """Async callback adapter bridged to the Rust tonic HTTP/2 gRPC server."""
 
@@ -180,35 +194,7 @@ def create_devbox_app(
             return outcome.to_dict()
 
         async def on_info(self) -> dict[str, Any]:
-            return {
-                "status": "ok" if supervisor.is_running else "degraded",
-                "hostname": host_hostname,
-                "os": host_os,
-                "arch": host_arch,
-                "workdir": cwd,
-                "session_id": client.session_id,
-                "active_cells": client.active_cell_count,
-                "active_shells": client.active_shell_count,
-            }
-
-        async def on_health(self) -> dict[str, Any]:
-            if not supervisor.is_running:
-                return {
-                    "status": "degraded",
-                    "session_id": client.session_id,
-                    "workdir": cwd,
-                    "error": "codex-code-mode-host is not running",
-                    "active_cells": client.active_cell_count,
-                    "active_shells": client.active_shell_count,
-                }
-            return {
-                "status": "ok",
-                "session_id": client.session_id,
-                "workdir": cwd,
-                "error": None,
-                "active_cells": client.active_cell_count,
-                "active_shells": client.active_shell_count,
-            }
+            return _status_payload()
 
         async def on_docs(self) -> dict[str, str] | None:
             return extracted_docs.to_dict() if extracted_docs is not None else None
@@ -226,14 +212,14 @@ def create_devbox_app(
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         Path(cwd).mkdir(parents=True, exist_ok=True)
-        await supervisor.start()
-        await client.start()
         app.state.grpc_addr = None
-        if grpc_server is not None:
-            bound = await grpc_server.start()
-            app.state.grpc_addr = bound
-            logger.info("Rust DevboxAgent gRPC server listening on %s", bound)
         try:
+            await supervisor.start()
+            await client.start()
+            if grpc_server is not None:
+                bound = await grpc_server.start()
+                app.state.grpc_addr = bound
+                logger.info("Rust DevboxAgent gRPC server listening on %s", bound)
             yield
         finally:
             if grpc_server is not None:
@@ -242,32 +228,9 @@ def create_devbox_app(
             await supervisor.stop()
 
     async def health(_request: Request) -> JSONResponse:
-        if not supervisor.is_running:
-            return JSONResponse(
-                {
-                    "status": "degraded",
-                    "error": "codex-code-mode-host is not running",
-                    "hostname": host_hostname,
-                    "os": host_os,
-                    "arch": host_arch,
-                    "workdir": cwd,
-                    "active_cells": client.active_cell_count,
-                    "active_shells": client.active_shell_count,
-                },
-                status_code=503,
-            )
-        return JSONResponse(
-            {
-                "status": "ok",
-                "session_id": client.session_id,
-                "hostname": host_hostname,
-                "os": host_os,
-                "arch": host_arch,
-                "workdir": cwd,
-                "active_cells": client.active_cell_count,
-                "active_shells": client.active_shell_count,
-            }
-        )
+        payload = _status_payload()
+        status_code = 200 if payload["status"] == "ok" else 503
+        return JSONResponse(payload, status_code=status_code)
 
     async def handle_exec(request: Request) -> JSONResponse:
         if (denied := _authorize(request)) is not None:

@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyFileNotFoundError, PyLookupError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use tokio::sync::Mutex;
@@ -262,23 +262,6 @@ impl PyClusterTransport {
         })
     }
 
-    #[pyo3(signature = (box_name=None, timeout_ms=3_000))]
-    fn fetch_code_mode_docs_sync(
-        &self,
-        py: Python<'_>,
-        box_name: Option<String>,
-        timeout_ms: u64,
-    ) -> PyResult<Option<Py<PyAny>>> {
-        let mgr = self.manager.clone();
-        let res = py.allow_threads(|| {
-            shared_runtime().block_on(mgr.fetch_code_mode_docs(box_name.as_deref(), timeout_ms))
-        });
-        match res {
-            Ok(Some(d)) => Ok(Some(docs_to_py(py, d)?)),
-            Ok(None) => Ok(None),
-            Err(e) => Err(map_transport_err(e)),
-        }
-    }
 }
 
 struct PyDevboxBackend {
@@ -300,14 +283,18 @@ impl PyDevboxBackend {
         .map_err(|e| Status::internal(e.to_string()))?;
 
         fut.await.map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("ValueError") {
-                Status::invalid_argument(msg)
-            } else if msg.contains("FileNotFoundError") || msg.contains("LookupError") {
-                Status::not_found(msg)
-            } else {
-                Status::internal(msg)
-            }
+            Python::with_gil(|py| {
+                let msg = e.to_string();
+                if e.is_instance_of::<PyValueError>(py) {
+                    Status::invalid_argument(msg)
+                } else if e.is_instance_of::<PyFileNotFoundError>(py)
+                    || e.is_instance_of::<PyLookupError>(py)
+                {
+                    Status::not_found(msg)
+                } else {
+                    Status::internal(msg)
+                }
+            })
         })
     }
 }
@@ -440,46 +427,10 @@ impl DevboxBackend for PyDevboxBackend {
                     .get_item("active_shells")?
                     .and_then(|v| v.extract::<u32>().ok())
                     .unwrap_or(0),
-            })
-        })
-        .map_err(|e| Status::internal(e.to_string()))
-    }
-
-    async fn get_health(&self) -> Result<pb::GetHealthResponse, Status> {
-        let obj = self
-            .call_py_coro(|_py, handler| {
-                let coro = handler.call_method0("on_health")?;
-                Ok(coro.unbind())
-            })
-            .await?;
-
-        Python::with_gil(|py| -> PyResult<pb::GetHealthResponse> {
-            let d = obj.bind(py).downcast::<PyDict>()?;
-            Ok(pb::GetHealthResponse {
-                status: d
-                    .get_item("status")?
-                    .and_then(|v| v.extract::<String>().ok())
-                    .unwrap_or_else(|| "ok".to_owned()),
-                session_id: d
-                    .get_item("session_id")?
-                    .and_then(|v| v.extract::<Option<String>>().ok())
-                    .flatten(),
-                workdir: d
-                    .get_item("workdir")?
-                    .and_then(|v| v.extract::<String>().ok())
-                    .unwrap_or_default(),
                 error: d
                     .get_item("error")?
                     .and_then(|v| v.extract::<Option<String>>().ok())
                     .flatten(),
-                active_cells: d
-                    .get_item("active_cells")?
-                    .and_then(|v| v.extract::<u32>().ok())
-                    .unwrap_or(0),
-                active_shells: d
-                    .get_item("active_shells")?
-                    .and_then(|v| v.extract::<u32>().ok())
-                    .unwrap_or(0),
             })
         })
         .map_err(|e| Status::internal(e.to_string()))
@@ -525,7 +476,6 @@ pub struct PyDevboxGrpcServer {
     internal_token: Option<String>,
     handler: Py<PyAny>,
     running: Arc<Mutex<Option<RunningGrpcServer>>>,
-    bound_addr: Arc<Mutex<Option<String>>>,
 }
 
 #[pymethods]
@@ -538,7 +488,6 @@ impl PyDevboxGrpcServer {
             internal_token,
             handler,
             running: Arc::new(Mutex::new(None)),
-            bound_addr: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -548,7 +497,6 @@ impl PyDevboxGrpcServer {
         let listen_addr = self.listen_addr.clone();
         let token = self.internal_token.clone();
         let running = self.running.clone();
-        let bound_addr = self.bound_addr.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut guard = running.lock().await;
@@ -560,7 +508,6 @@ impl PyDevboxGrpcServer {
                 .await
                 .map_err(|e| PyRuntimeError::new_err(format!("failed to start gRPC server: {e}")))?;
             let addr_str = server.local_addr.to_string();
-            *bound_addr.lock().await = Some(addr_str.clone());
             *guard = Some(server);
             Ok(addr_str)
         })
@@ -568,10 +515,8 @@ impl PyDevboxGrpcServer {
 
     fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let running = self.running.clone();
-        let bound_addr = self.bound_addr.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let server = running.lock().await.take();
-            *bound_addr.lock().await = None;
             if let Some(srv) = server {
                 srv.stop().await;
             }

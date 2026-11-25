@@ -16,8 +16,11 @@ COPY proto ./proto
 COPY crates ./crates
 COPY src ./src
 
-RUN pip install --no-cache-dir "maturin>=1.7,<2.0" \
-    && maturin build --release --out /wheels
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/build/target \
+    pip install --no-cache-dir "maturin>=1.7,<2.0" \
+    && maturin build --release --locked --out /wheels
 
 FROM python:3.14-slim
 
