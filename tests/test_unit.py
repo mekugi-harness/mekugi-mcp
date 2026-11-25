@@ -266,7 +266,12 @@ async def test_mcp_list_tools_gemini_safe_and_no_gate() -> None:
         tools = await client.list_tools()
 
     names = {t.name for t in tools}
-    assert names == {"exec", "wait"}
+    assert names == {"exec", "wait", "list_boxes"}
+    by_name = {t.name: t for t in tools}
+    assert "box" in by_name["exec"].input_schema["properties"]
+    assert by_name["exec"].input_schema["properties"]["box"]["type"] == "string"
+    assert "box" not in by_name["exec"].input_schema.get("required", [])
+    assert "box" in by_name["wait"].input_schema["properties"]
 
     for tool in tools:
         assert tool.annotations is not None
@@ -436,8 +441,10 @@ const WAIT_DESCRIPTION_TEMPLATE: &str = r#"- Wait for cell_id."#;
 async def test_mcp_refreshes_tool_descriptions_after_devbox_recovers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("CODE_MODE_DOCS_PATH", raising=False)
     from mekugi_mcp import server as server_mod
 
+    monkeypatch.setattr(server_mod, "DOCS_RETRY_BACKOFF_S", 0.0)
     state: dict[str, tuple[str, str, str] | None] = {"live": None}
 
     async def _fake_fetch(**_kwargs: object) -> tuple[str, str, str] | None:
@@ -491,3 +498,56 @@ async def test_pty_manager_reaps_unpolled_exited_pty_session(
     assert len(mgr._sessions) == 0
     assert managed.master_fd is None
     assert managed.closed is True
+
+
+@pytest.mark.asyncio
+async def test_cluster_config_env_and_routing_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from mekugi_mcp._transport import format_cell_id, parse_cell_route
+
+    assert format_cell_id("gpu-1", "c1") == "gpu-1:c1"
+    assert parse_cell_route("gpu-1:c1", None, "local") == ("gpu-1", "c1")
+    assert parse_cell_route("c1", None, "local") == ("local", "c1")
+    with pytest.raises(ValueError, match="conflicting box"):
+        parse_cell_route("gpu-1:c1", "local", "local")
+
+    boxes_cfg = {
+        "default_box": "gpu-1",
+        "boxes": [
+            {"name": "local", "target": "grpc://127.0.0.1:9", "description": "Local box"},
+            {
+                "name": "gpu-1",
+                "target": "grpc://127.0.0.1:9",
+                "pool_size": 2,
+                "labels": {"gpu": "rtx4090"},
+            },
+        ],
+    }
+    cfg_file = tmp_path / "boxes.json"
+    cfg_file.write_text(json.dumps(boxes_cfg), encoding="utf-8")
+
+    monkeypatch.delenv("DEVBOXES_JSON", raising=False)
+    monkeypatch.setenv("DEVBOXES_FILE", str(cfg_file))
+    monkeypatch.setenv("DEFAULT_BOX", "")
+    mcp_from_file_default = create_mcp_server(use_env_auth=False)
+    async with Client(mcp_from_file_default) as client:
+        listed_default = await client.call_tool("list_boxes", {})
+        payload_default = json.loads(listed_default.content[0].text)  # type: ignore[union-attr]
+        assert payload_default["default_box"] == "gpu-1"
+
+    monkeypatch.setenv("DEFAULT_BOX", "local")
+    mcp = create_mcp_server(use_env_auth=False)
+    async with Client(mcp) as client:
+        listed = await client.call_tool("list_boxes", {})
+        payload = json.loads(listed.content[0].text)  # type: ignore[union-attr]
+        assert payload["default_box"] == "local"
+        assert [b["name"] for b in payload["boxes"]] == ["local", "gpu-1"]
+        assert payload["boxes"][0]["is_default"] is True
+        assert payload["boxes"][1]["pool_size"] == 2
+        assert payload["boxes"][1]["labels"] == {"gpu": "rtx4090"}
+
+        with pytest.raises(Exception, match="unknown box 'nope'"):
+            await client.call_tool("exec", {"code": 'text("hi");', "box": "nope"})

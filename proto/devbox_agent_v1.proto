@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package mekugi.devbox.v1;
+
+// DevboxAgent is the multiplexed HTTP/2 gRPC transport between mekugi-mcp and
+// each devbox machine. Every RPC runs on an independent HTTP/2 stream over a
+// persistent keep-alive connection so one slow Exec/Wait never blocks others.
+service DevboxAgent {
+  rpc Exec(ExecRequest) returns (ExecResponse);
+  rpc Wait(WaitRequest) returns (WaitResponse);
+  rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+  rpc GetCodeModeDocs(GetCodeModeDocsRequest) returns (GetCodeModeDocsResponse);
+}
+
+message ExecRequest {
+  string code = 1;
+  uint32 yield_time_ms = 2;
+  uint32 max_output_tokens = 3;
+}
+
+message ExecResponse {
+  string cell_id = 1;
+  string status = 2;
+  string text = 3;
+  bool more_output = 4;
+  optional string error_text = 5;
+}
+
+message WaitRequest {
+  string cell_id = 1;
+  uint32 yield_time_ms = 2;
+  uint32 max_output_tokens = 3;
+  bool terminate = 4;
+}
+
+message WaitResponse {
+  string cell_id = 1;
+  string status = 2;
+  string text = 3;
+  bool more_output = 4;
+  optional string error_text = 5;
+}
+
+message GetInfoRequest {}
+
+message GetInfoResponse {
+  string status = 1;
+  string hostname = 2;
+  string os = 3;
+  string arch = 4;
+  string workdir = 5;
+  optional string session_id = 6;
+  uint32 active_cells = 7;
+  uint32 active_shells = 8;
+  optional string error = 9;
+}
+
+message GetCodeModeDocsRequest {}
+
+message GetCodeModeDocsResponse {
+  string source_repo = 1;
+  string source_ref = 2;
+  string exec_description_template = 3;
+  string wait_description_template = 4;
+  string image_helper_description = 5;
+}

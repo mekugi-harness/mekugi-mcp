@@ -109,6 +109,10 @@ class ProcessManager:
         self._session_tmp = Path(os.environ.get("SESSION_TMP", "/tmp/mekugi-session"))
         self._session_tmp.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def active_session_count(self) -> int:
+        return sum(1 for s in self._sessions.values() if s.process.returncode is None)
+
     def _resolve_workdir(self, workdir: str | None) -> str:
         if not workdir:
             base = Path(self.default_workdir)

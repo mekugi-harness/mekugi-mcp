@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=75", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "mekugi-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "FastMCP server exposing Mekugi's functions.exec in a Docker devbox for Gemini Web"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "grpcio-tools>=1.85.3",
+    "maturin>=1.7,<2.0",
     "pytest>=8.3.0",
     "pytest-asyncio>=0.25.0",
     "ruff>=0.9.0",
@@ -31,8 +32,11 @@ dev = [
 mekugi-mcp = "mekugi_mcp.server:main"
 mekugi-devbox = "mekugi_mcp.devbox_server:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.maturin]
+manifest-path = "crates/mekugi-transport/Cargo.toml"
+python-source = "src"
+module-name = "mekugi_mcp._transport"
+features = ["extension-module"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

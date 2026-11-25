@@ -7,8 +7,11 @@ import contextlib
 import hmac
 import logging
 import os
+import platform
+import socket
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from starlette.applications import Starlette
@@ -16,6 +19,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from mekugi_mcp._transport import DevboxGrpcServer
 from mekugi_mcp.code_mode_client import MAX_CELL_YIELD_TIME_MS, CodeModeHostClient
 from mekugi_mcp.code_mode_docs import load_extracted_docs_file
 
@@ -89,6 +93,7 @@ class HostSupervisor:
 def create_devbox_app(
     *,
     grpc_target: str | None = None,
+    grpc_listen_addr: str | None = None,
     host_binary: str | None = None,
     workdir: str | None = None,
     default_shell: str | None = None,
@@ -97,10 +102,18 @@ def create_devbox_app(
     docs_path: str | None = None,
 ) -> Starlette:
     target = grpc_target or os.environ.get("CODE_MODE_HOST_TARGET", "127.0.0.1:50051")
+    resolved_grpc_listen = (
+        grpc_listen_addr
+        if grpc_listen_addr is not None
+        else os.environ.get("DEVBOX_GRPC_ADDR", "0.0.0.0:50052").strip()
+    )
     binary = host_binary if host_binary is not None else os.environ.get("CODE_MODE_HOST_BIN", "/usr/local/bin/codex-code-mode-host")
     cwd = workdir or os.environ.get("DEVBOX_WORKDIR", "/workspace")
     shell = default_shell or os.environ.get("DEVBOX_SHELL", "/bin/bash")
     max_yield = max_yield_time_ms or int(os.environ.get("MAX_CELL_YIELD_TIME_MS", str(MAX_CELL_YIELD_TIME_MS)))
+    host_hostname = socket.gethostname()
+    host_os = platform.system().lower()
+    host_arch = platform.machine().lower()
     resolved_docs_path = (
         docs_path
         if docs_path is not None
@@ -134,34 +147,90 @@ def create_devbox_app(
         ensure_host_running=supervisor.ensure_running,
     )
 
+    def _status_payload() -> dict[str, Any]:
+        running = supervisor.is_running
+        return {
+            "status": "ok" if running else "degraded",
+            "hostname": host_hostname,
+            "os": host_os,
+            "arch": host_arch,
+            "workdir": cwd,
+            "session_id": client.session_id,
+            "active_cells": client.active_cell_count,
+            "active_shells": client.active_shell_count,
+            "error": None if running else "codex-code-mode-host is not running",
+        }
+
+    class _DevboxGrpcHandler:
+        """Async callback adapter bridged to the Rust tonic HTTP/2 gRPC server."""
+
+        async def on_exec(
+            self, code: str, yield_time_ms: int, max_output_tokens: int
+        ) -> dict[str, Any]:
+            if not isinstance(code, str) or not code.strip():
+                raise ValueError("'code' must be a non-empty string")
+            outcome = await client.execute(
+                code,
+                yield_time_ms=yield_time_ms,
+                max_output_tokens=max_output_tokens,
+            )
+            return outcome.to_dict()
+
+        async def on_wait(
+            self,
+            cell_id: str,
+            yield_time_ms: int,
+            max_output_tokens: int,
+            terminate: bool,
+        ) -> dict[str, Any]:
+            if not isinstance(cell_id, str) or not cell_id.strip():
+                raise ValueError("'cell_id' must be a non-empty string")
+            outcome = await client.wait(
+                cell_id,
+                yield_time_ms=yield_time_ms,
+                max_output_tokens=max_output_tokens,
+                terminate=terminate,
+            )
+            return outcome.to_dict()
+
+        async def on_info(self) -> dict[str, Any]:
+            return _status_payload()
+
+        async def on_docs(self) -> dict[str, str] | None:
+            return extracted_docs.to_dict() if extracted_docs is not None else None
+
+    grpc_server = (
+        DevboxGrpcServer(
+            resolved_grpc_listen,
+            _DevboxGrpcHandler(),
+            internal_token=expected_token or None,
+        )
+        if resolved_grpc_listen
+        else None
+    )
+
     @contextlib.asynccontextmanager
-    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
         Path(cwd).mkdir(parents=True, exist_ok=True)
-        await supervisor.start()
-        await client.start()
+        app.state.grpc_addr = None
         try:
+            await supervisor.start()
+            await client.start()
+            if grpc_server is not None:
+                bound = await grpc_server.start()
+                app.state.grpc_addr = bound
+                logger.info("Rust DevboxAgent gRPC server listening on %s", bound)
             yield
         finally:
+            if grpc_server is not None:
+                await grpc_server.stop()
             await client.close()
             await supervisor.stop()
 
     async def health(_request: Request) -> JSONResponse:
-        if not supervisor.is_running:
-            return JSONResponse(
-                {
-                    "status": "degraded",
-                    "error": "codex-code-mode-host is not running",
-                    "workdir": cwd,
-                },
-                status_code=503,
-            )
-        return JSONResponse(
-            {
-                "status": "ok",
-                "session_id": client.session_id,
-                "workdir": cwd,
-            }
-        )
+        payload = _status_payload()
+        status_code = 200 if payload["status"] == "ok" else 503
+        return JSONResponse(payload, status_code=status_code)
 
     async def handle_exec(request: Request) -> JSONResponse:
         if (denied := _authorize(request)) is not None:

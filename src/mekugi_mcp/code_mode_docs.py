@@ -136,17 +136,14 @@ def load_extracted_docs_file(path: str | Path) -> ExtractedCodeModeDocs | None:
 def resolve_mcp_tool_descriptions(
     *,
     docs_path: str | None = None,
-    devbox_url: str | None = None,
-    devbox_headers: dict[str, str] | None = None,
     default_exec_yield_time_ms: int = 10_000,
 ) -> tuple[str, str, str | None]:
     """Resolve `(exec_description, wait_description, source_ref)` for the MCP server.
 
     Lookup order:
     1. Local extracted JSON file (`docs_path` or `CODE_MODE_DOCS_PATH`).
-    2. Running devbox `GET /code-mode-docs` (which holds the build-time extracted docs
-       matched to the exact `SOURCE_REVISION` of the downloaded `codex-code-mode-host`).
-    3. Built-in fallback descriptions in `tool_catalog.py`.
+    2. Built-in fallback descriptions in `tool_catalog.py` (refreshed asynchronously
+       from the default devbox via the Rust cluster transport on `tools/list`).
     """
     resolved_path = docs_path or os.environ.get("CODE_MODE_DOCS_PATH", "").strip()
     if resolved_path:
@@ -160,48 +157,29 @@ def resolve_mcp_tool_descriptions(
         except Exception as exc:
             logger.warning("Failed to load code-mode docs from %s: %s", resolved_path, exc)
 
-    if devbox_url:
-        try:
-            resp = httpx.get(
-                f"{devbox_url.rstrip('/')}/code-mode-docs",
-                headers=devbox_headers or {},
-                timeout=3.0,
-            )
-            if resp.status_code == 200:
-                docs = ExtractedCodeModeDocs.from_dict(resp.json())
-                exec_desc, wait_desc = render_tool_descriptions(
-                    docs, default_exec_yield_time_ms=default_exec_yield_time_ms
-                )
-                return exec_desc, wait_desc, docs.source_ref
-        except Exception as exc:
-            logger.debug("Could not fetch code-mode docs from devbox %s: %s", devbox_url, exc)
-
     return EXEC_TOOL_DESCRIPTION, WAIT_TOOL_DESCRIPTION, None
 
 
 async def fetch_devbox_tool_descriptions(
     *,
-    devbox_url: str,
-    devbox_headers: dict[str, str] | None = None,
+    cluster_transport: Any,
     default_exec_yield_time_ms: int = 10_000,
     timeout_s: float = 2.0,
 ) -> tuple[str, str, str] | None:
     """Asynchronously fetch and render live code-mode docs from a running devbox."""
     try:
-        async with httpx.AsyncClient(timeout=timeout_s) as http:
-            resp = await http.get(
-                f"{devbox_url.rstrip('/')}/code-mode-docs",
-                headers=devbox_headers or {},
-            )
-            if resp.status_code != 200:
-                return None
-            docs = ExtractedCodeModeDocs.from_dict(resp.json())
-            exec_desc, wait_desc = render_tool_descriptions(
-                docs, default_exec_yield_time_ms=default_exec_yield_time_ms
-            )
-            return exec_desc, wait_desc, docs.source_ref
+        raw = await cluster_transport.fetch_code_mode_docs(
+            None, int(max(0.2, timeout_s) * 1000)
+        )
+        if raw is None:
+            return None
+        docs = ExtractedCodeModeDocs.from_dict(raw)
+        exec_desc, wait_desc = render_tool_descriptions(
+            docs, default_exec_yield_time_ms=default_exec_yield_time_ms
+        )
+        return exec_desc, wait_desc, docs.source_ref
     except Exception as exc:
-        logger.debug("Could not refresh code-mode docs from devbox %s: %s", devbox_url, exc)
+        logger.debug("Could not refresh code-mode docs via cluster transport: %s", exc)
         return None
 
 

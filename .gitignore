@@ -8,3 +8,6 @@ __pycache__/
 dist/
 build/
 data/
+target/
+src/mekugi_mcp/*.so
+src/mekugi_mcp/*.pyd
