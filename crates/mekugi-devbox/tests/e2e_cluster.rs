@@ -254,3 +254,100 @@ text(p + "\n" + r);"#
     let _ = child_a.start_kill();
     let _ = child_b.start_kill();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_systemd_sd_notify_lifecycle() {
+    use std::os::unix::net::UnixDatagram;
+
+    let Some(host_bin) = find_host_bin() else {
+        eprintln!("skipping e2e test: codex-code-mode-host not installed");
+        return;
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let notify_sock = tmp.path().join("notify.sock");
+    let sock = UnixDatagram::bind(&notify_sock).unwrap();
+    sock.set_nonblocking(true).unwrap();
+
+    let cm_port = free_port();
+    let grpc_port = free_port();
+    let bin_path = std::env::var("CARGO_BIN_EXE_mekugi-devbox")
+        .expect("CARGO_BIN_EXE_mekugi-devbox should be set by cargo test");
+
+    let mut child = Command::new(bin_path)
+        .env("CODE_MODE_HOST_BIN", &host_bin)
+        .env("CODE_MODE_HOST_TARGET", format!("127.0.0.1:{cm_port}"))
+        .env("DEVBOX_WORKDIR", tmp.path())
+        .env("DEVBOX_GRPC_ADDR", format!("127.0.0.1:{grpc_port}"))
+        .env("DEVBOX_PORT", "")
+        .env("DEVBOX_INTERNAL_TOKEN", "systemd-test-token")
+        .env("CODE_MODE_DOCS_PATH", "")
+        .env("NOTIFY_SOCKET", &notify_sock)
+        .env("WATCHDOG_USEC", "400000")
+        .env("LOG_LEVEL", "warn")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("failed to spawn mekugi-devbox");
+
+    async fn recv_notify(sock: &UnixDatagram, timeout: Duration) -> Option<String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut buf = [0u8; 512];
+        loop {
+            match sock.recv(&mut buf) {
+                Ok(n) => return Some(String::from_utf8_lossy(&buf[..n]).into_owned()),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(e) => panic!("notify socket recv failed: {e}"),
+            }
+        }
+    }
+
+    let ready = recv_notify(&sock, Duration::from_secs(10))
+        .await
+        .expect("timed out waiting for READY=1");
+    assert!(ready.contains("READY=1"), "unexpected ready msg: {ready}");
+    assert!(
+        ready.contains(&format!("gRPC 127.0.0.1:{grpc_port}")),
+        "expected gRPC addr in STATUS: {ready}"
+    );
+    assert!(
+        !ready.contains("HTTP"),
+        "HTTP should be disabled when DEVBOX_PORT is empty: {ready}"
+    );
+
+    let watchdog = recv_notify(&sock, Duration::from_secs(2))
+        .await
+        .expect("timed out waiting for WATCHDOG=1");
+    assert_eq!(watchdog, "WATCHDOG=1");
+
+    let pid = child.id().expect("child pid");
+    let status = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .expect("failed to send SIGTERM");
+    assert!(status.success());
+
+    let mut saw_stopping = false;
+    for _ in 0..10 {
+        if let Some(msg) = recv_notify(&sock, Duration::from_secs(2)).await {
+            if msg.contains("STOPPING=1") {
+                saw_stopping = true;
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    assert!(saw_stopping, "did not receive STOPPING=1 on SIGTERM");
+
+    let exit = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("timed out waiting for graceful exit")
+        .expect("wait failed");
+    assert!(exit.success(), "expected clean exit on SIGTERM, got {exit}");
+}
