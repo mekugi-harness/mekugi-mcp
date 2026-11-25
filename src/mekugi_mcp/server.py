@@ -28,8 +28,9 @@ from mekugi_mcp.auth import (
     enforce_allowed_email,
     parse_allowed_emails,
 )
-from mekugi_mcp.code_mode_client import DEFAULT_CELL_YIELD_TIME_MS, MAX_CELL_YIELD_TIME_MS
 from mekugi_mcp.code_mode_docs import (
+    DEFAULT_CELL_YIELD_TIME_MS,
+    MAX_CELL_YIELD_TIME_MS,
     fetch_devbox_tool_descriptions,
     resolve_mcp_tool_descriptions,
 )

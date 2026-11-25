@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mekugi-transport"]
+members = ["crates/mekugi-transport", "crates/mekugi-devbox"]
 resolver = "2"
 
 [workspace.package]

@@ -1,24 +1,18 @@
-"""Build-time extractor and runtime renderer for Mekugi's canonical code-mode instructions."""
+"""Runtime renderer and fallback tool descriptions for Mekugi's code-mode MCP tools."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
-
-from mekugi_mcp.tool_catalog import EXEC_TOOL_DESCRIPTION, WAIT_TOOL_DESCRIPTION
-
 logger = logging.getLogger(__name__)
 
-DEFAULT_MEKUGI_REPO = "mekugi-harness/mekugi"
-DESCRIPTION_RS_PATH = "codex-rs/code-mode-protocol/src/description.rs"
+DEFAULT_CELL_YIELD_TIME_MS = 10_000
+MAX_CELL_YIELD_TIME_MS = 45_000
 
 NESTED_TOOLS_SECTION = """Nested tools available on `tools`:
 - `await tools.exec_command({ cmd: string, workdir?: string, shell?: string, login?: boolean, tty?: boolean, yield_time_ms?: number, max_output_tokens?: number }): Promise<string>`
@@ -39,6 +33,22 @@ WAIT_MCP_ADDENDUM = (
     "- Unread output from exited shell sessions is retained for 10 minutes."
 )
 
+EXEC_TOOL_DESCRIPTION = """Run JavaScript code in Mekugi's V8 code-mode isolate to orchestrate devbox tool calls.
+- Pass raw JavaScript in `code` (no Markdown fences). Each call runs as an async module in a fresh V8 isolate without Node, fs, network, or console.
+- Call nested tools on the global `tools` object:
+  - `await tools.exec_command({ cmd: string, workdir?: string, shell?: string, login?: boolean, tty?: boolean, yield_time_ms?: number, max_output_tokens?: number }): Promise<string>`
+  - `await tools.write_stdin({ session_id: number, chars?: string, yield_time_ms?: number, max_output_tokens?: number }): Promise<string>`
+  - `await tools.apply_patch(patch: string): Promise<string>` (Codex `*** Begin Patch` ... `*** End Patch` format)
+- Optional first-line pragma: `// @exec: {"yield_time_ms": 10000, "max_output_tokens": 10000}`.
+- Global helpers: `text(value)`, `exit()`, `store(key, value)`, `load(key)`, `notify(value)`, `yield_control()`, `setTimeout`, `clearTimeout`, `ALL_TOOLS`.
+- Always print results you want returned with `text(...)`.
+- If the script is still running after `yield_time_ms` (capped at 45000 ms), the response includes a `cell_id`; continue with `wait`."""
+
+WAIT_TOOL_DESCRIPTION = """Wait on a running `exec` cell, read its next output page, or terminate it.
+- Pass `cell_id` from a previous `exec` or `wait` response.
+- Set `terminate: true` to stop the running cell.
+- For a running shell `session_id` inside a completed cell, poll `tools.write_stdin` inside `exec` instead (unread output after process exit is retained for 10 minutes)."""
+
 
 @dataclass(frozen=True)
 class ExtractedCodeModeDocs:
@@ -47,15 +57,6 @@ class ExtractedCodeModeDocs:
     exec_description_template: str
     wait_description_template: str
     image_helper_description: str
-
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "source_repo": self.source_repo,
-            "source_ref": self.source_ref,
-            "exec_description_template": self.exec_description_template,
-            "wait_description_template": self.wait_description_template,
-            "image_helper_description": self.image_helper_description,
-        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ExtractedCodeModeDocs:
@@ -68,51 +69,12 @@ class ExtractedCodeModeDocs:
         )
 
 
-def extract_rust_raw_str_const(source: str, const_name: str) -> str:
-    """Extract a Rust `const NAME: &str = r#\"...\"#;` (any number of `#` delimiters)."""
-    pattern = re.compile(
-        rf"(?:pub\s+)?const\s+{re.escape(const_name)}\s*:\s*&str\s*=\s*r(#*)\"",
-    )
-    match = pattern.search(source)
-    if match is None:
-        raise ValueError(f"Could not find Rust raw string constant {const_name!r}")
-    hashes = match.group(1)
-    start = match.end()
-    closing = f'"{hashes};'
-    end = source.find(closing, start)
-    if end == -1:
-        raise ValueError(f"Unterminated Rust raw string constant {const_name!r}")
-    return source[start:end]
-
-
-def parse_description_rs(
-    source: str,
-    *,
-    source_repo: str,
-    source_ref: str,
-) -> ExtractedCodeModeDocs:
-    """Parse Mekugi's `description.rs` into structured code-mode prompt templates."""
-    exec_tpl = extract_rust_raw_str_const(source, "EXEC_DESCRIPTION_TEMPLATE")
-    wait_tpl = extract_rust_raw_str_const(source, "WAIT_DESCRIPTION_TEMPLATE")
-    try:
-        image_helper = extract_rust_raw_str_const(source, "UNIFIED_IMAGE_HELPER_DESCRIPTION")
-    except ValueError:
-        image_helper = extract_rust_raw_str_const(source, "LEGACY_IMAGE_HELPER_DESCRIPTION")
-    return ExtractedCodeModeDocs(
-        source_repo=source_repo,
-        source_ref=source_ref,
-        exec_description_template=exec_tpl,
-        wait_description_template=wait_tpl,
-        image_helper_description=image_helper,
-    )
-
-
 def render_tool_descriptions(
     docs: ExtractedCodeModeDocs,
     *,
-    default_exec_yield_time_ms: int = 10_000,
+    default_exec_yield_time_ms: int = DEFAULT_CELL_YIELD_TIME_MS,
 ) -> tuple[str, str]:
-    """Render Mekugi's extracted templates into MCP `exec` and `wait` tool descriptions."""
+    """Render Mekugi's extracted templates into MCP exec and wait tool descriptions."""
     exec_body = (
         docs.exec_description_template.replace(
             "{{ default_exec_yield_time_ms }}", str(default_exec_yield_time_ms)
@@ -136,15 +98,9 @@ def load_extracted_docs_file(path: str | Path) -> ExtractedCodeModeDocs | None:
 def resolve_mcp_tool_descriptions(
     *,
     docs_path: str | None = None,
-    default_exec_yield_time_ms: int = 10_000,
+    default_exec_yield_time_ms: int = DEFAULT_CELL_YIELD_TIME_MS,
 ) -> tuple[str, str, str | None]:
-    """Resolve `(exec_description, wait_description, source_ref)` for the MCP server.
-
-    Lookup order:
-    1. Local extracted JSON file (`docs_path` or `CODE_MODE_DOCS_PATH`).
-    2. Built-in fallback descriptions in `tool_catalog.py` (refreshed asynchronously
-       from the default devbox via the Rust cluster transport on `tools/list`).
-    """
+    """Resolve (exec_description, wait_description, source_ref) from static file or fallback."""
     resolved_path = docs_path or os.environ.get("CODE_MODE_DOCS_PATH", "").strip()
     if resolved_path:
         try:
@@ -156,17 +112,16 @@ def resolve_mcp_tool_descriptions(
                 return exec_desc, wait_desc, docs.source_ref
         except Exception as exc:
             logger.warning("Failed to load code-mode docs from %s: %s", resolved_path, exc)
-
     return EXEC_TOOL_DESCRIPTION, WAIT_TOOL_DESCRIPTION, None
 
 
 async def fetch_devbox_tool_descriptions(
     *,
     cluster_transport: Any,
-    default_exec_yield_time_ms: int = 10_000,
+    default_exec_yield_time_ms: int = DEFAULT_CELL_YIELD_TIME_MS,
     timeout_s: float = 2.0,
 ) -> tuple[str, str, str] | None:
-    """Asynchronously fetch and render live code-mode docs from a running devbox."""
+    """Asynchronously fetch and render live code-mode docs from the default devbox."""
     try:
         raw = await cluster_transport.fetch_code_mode_docs(
             None, int(max(0.2, timeout_s) * 1000)
@@ -181,44 +136,3 @@ async def fetch_devbox_tool_descriptions(
     except Exception as exc:
         logger.debug("Could not refresh code-mode docs via cluster transport: %s", exc)
         return None
-
-
-def fetch_description_rs(*, repo: str, ref: str, timeout_s: float = 30.0) -> str:
-    url = f"https://raw.githubusercontent.com/{repo}/{ref}/{DESCRIPTION_RS_PATH}"
-    resp = httpx.get(url, follow_redirects=True, timeout=timeout_s)
-    resp.raise_for_status()
-    return resp.text
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Extract Mekugi code-mode tool descriptions from Mekugi's description.rs"
-    )
-    parser.add_argument("--repo", default=DEFAULT_MEKUGI_REPO, help="GitHub owner/repo for Mekugi monorepo")
-    ref_group = parser.add_mutually_exclusive_group(required=True)
-    ref_group.add_argument("--ref", help="Git ref/SHA matching the downloaded Mekugi binary")
-    ref_group.add_argument("--ref-file", help="Path to SOURCE_REVISION file from Mekugi tarball")
-    ref_group.add_argument("--source-file", help="Local path to description.rs (offline mode)")
-    parser.add_argument("--output", required=True, help="Output JSON file path")
-    args = parser.parse_args()
-
-    if args.source_file:
-        source_text = Path(args.source_file).read_text(encoding="utf-8")
-        source_ref = "local"
-    else:
-        source_ref = (
-            Path(args.ref_file).read_text(encoding="utf-8").strip()
-            if args.ref_file
-            else str(args.ref).strip()
-        )
-        source_text = fetch_description_rs(repo=args.repo, ref=source_ref)
-
-    docs = parse_description_rs(source_text, source_repo=args.repo, source_ref=source_ref)
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(docs.to_dict(), indent=2) + "\n", encoding="utf-8")
-    print(f"Extracted Mekugi code-mode docs from {args.repo}@{source_ref} -> {out}")
-
-
-if __name__ == "__main__":
-    main()

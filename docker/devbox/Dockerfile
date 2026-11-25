@@ -1,30 +1,27 @@
-FROM ubuntu:26.04 AS wheel-builder
+FROM ubuntu:26.04 AS rust-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     curl \
+    git \
     pkg-config \
-    python3 \
-    python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 
 WORKDIR /build
-COPY Cargo.toml Cargo.lock pyproject.toml README.md ./
+COPY Cargo.toml Cargo.lock ./
 COPY proto ./proto
 COPY crates ./crates
-COPY src ./src
 
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/build/target \
-    python3 -m venv /tmp/build-venv \
-    && /tmp/build-venv/bin/pip install --no-cache-dir "maturin>=1.7,<2.0" \
-    && /tmp/build-venv/bin/maturin build --release --locked -i /usr/bin/python3 --out /wheels
+    cargo build --release --locked -p mekugi-devbox \
+    && cp /build/target/release/mekugi-devbox /usr/local/bin/mekugi-devbox
 
 FROM ubuntu:26.04
 
@@ -49,13 +46,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    python3-venv \
     sudo \
     && echo 'ubuntu ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/ubuntu \
     && chmod 0440 /etc/sudoers.d/ubuntu \
     && mkdir -p /workspace \
     && chown ubuntu:ubuntu /workspace \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=rust-builder /usr/local/bin/mekugi-devbox /usr/local/bin/mekugi-devbox
 
 # Pull prebuilt codex-code-mode-host and its SOURCE_REVISION from Mekugi GitHub Release.
 RUN set -eu; \
@@ -79,16 +77,16 @@ RUN --mount=type=secret,id=GITHUB_TOKEN \
     && sudo rm -rf /var/lib/apt/lists/*
 
 USER root
-WORKDIR /opt/mekugi-mcp
-COPY --from=wheel-builder /wheels/*.whl /tmp/wheels/
-
-RUN /usr/bin/python3 -m venv /opt/mekugi-mcp/.venv \
-    && /opt/mekugi-mcp/.venv/bin/pip install --no-cache-dir /tmp/wheels/*.whl \
-    && rm -rf /tmp/wheels \
-    && /opt/mekugi-mcp/.venv/bin/python -m mekugi_mcp.code_mode_docs \
-        --repo "${MEKUGI_REPO}" \
-        --ref-file /usr/local/share/mekugi/SOURCE_REVISION \
-        --output /usr/local/share/mekugi/code-mode-docs.json
+RUN set -eu; \
+    rev="$(tr -d '[:space:]' < /usr/local/share/mekugi/SOURCE_REVISION)"; \
+    base="https://raw.githubusercontent.com/${MEKUGI_REPO}/${rev}"; \
+    curl -fsSL "${base}/codex-rs/code-mode-protocol/src/description.rs" -o /tmp/description.rs; \
+    /usr/local/bin/mekugi-devbox --extract-docs \
+      --repo "${MEKUGI_REPO}" \
+      --ref "${rev}" \
+      --source-file /tmp/description.rs \
+      --output /usr/local/share/mekugi/code-mode-docs.json; \
+    rm -f /tmp/description.rs
 
 USER ubuntu
 WORKDIR /workspace
@@ -98,4 +96,4 @@ EXPOSE 8080 50052
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=5 \
     CMD curl -fsS http://127.0.0.1:8080/health >/dev/null || exit 1
 
-CMD ["/opt/mekugi-mcp/.venv/bin/mekugi-devbox"]
+CMD ["/usr/local/bin/mekugi-devbox"]
