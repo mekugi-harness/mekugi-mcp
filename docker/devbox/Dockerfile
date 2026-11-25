@@ -1,3 +1,24 @@
+FROM python:3.14-slim AS wheel-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock pyproject.toml README.md ./
+COPY proto ./proto
+COPY crates ./crates
+COPY src ./src
+
+RUN pip install --no-cache-dir "maturin>=1.7,<2.0" \
+    && maturin build --release --out /wheels
+
 FROM ubuntu:26.04
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -13,6 +34,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DEVBOX_WORKDIR=/workspace \
     DEVBOX_HOST=0.0.0.0 \
     DEVBOX_PORT=8080 \
+    DEVBOX_GRPC_ADDR=0.0.0.0:50052 \
     CODE_MODE_HOST_BIN=/usr/local/bin/codex-code-mode-host \
     CODE_MODE_HOST_TARGET=127.0.0.1:50051 \
     CODE_MODE_DOCS_PATH=/usr/local/share/mekugi/code-mode-docs.json
@@ -51,11 +73,11 @@ RUN --mount=type=secret,id=GITHUB_TOKEN \
 
 USER root
 WORKDIR /opt/mekugi-mcp
-COPY pyproject.toml README.md ./
-COPY src ./src
+COPY --from=wheel-builder /wheels/*.whl /tmp/wheels/
 
 RUN /usr/bin/python3 -m venv /opt/mekugi-mcp/.venv \
-    && /opt/mekugi-mcp/.venv/bin/pip install --no-cache-dir . \
+    && /opt/mekugi-mcp/.venv/bin/pip install --no-cache-dir /tmp/wheels/*.whl \
+    && rm -rf /tmp/wheels \
     && /opt/mekugi-mcp/.venv/bin/python -m mekugi_mcp.code_mode_docs \
         --repo "${MEKUGI_REPO}" \
         --ref-file /usr/local/share/mekugi/SOURCE_REVISION \
@@ -64,7 +86,7 @@ RUN /usr/bin/python3 -m venv /opt/mekugi-mcp/.venv \
 USER ubuntu
 WORKDIR /workspace
 
-EXPOSE 8080
+EXPOSE 8080 50052
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=5 \
     CMD curl -fsS http://127.0.0.1:8080/health >/dev/null || exit 1

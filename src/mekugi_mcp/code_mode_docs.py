@@ -138,6 +138,7 @@ def resolve_mcp_tool_descriptions(
     docs_path: str | None = None,
     devbox_url: str | None = None,
     devbox_headers: dict[str, str] | None = None,
+    cluster_transport: Any | None = None,
     default_exec_yield_time_ms: int = 10_000,
 ) -> tuple[str, str, str | None]:
     """Resolve `(exec_description, wait_description, source_ref)` for the MCP server.
@@ -160,6 +161,18 @@ def resolve_mcp_tool_descriptions(
         except Exception as exc:
             logger.warning("Failed to load code-mode docs from %s: %s", resolved_path, exc)
 
+    if cluster_transport is not None:
+        try:
+            raw = cluster_transport.fetch_code_mode_docs_sync(None, 3000)
+            if raw is not None:
+                docs = ExtractedCodeModeDocs.from_dict(raw)
+                exec_desc, wait_desc = render_tool_descriptions(
+                    docs, default_exec_yield_time_ms=default_exec_yield_time_ms
+                )
+                return exec_desc, wait_desc, docs.source_ref
+        except Exception as exc:
+            logger.debug("Could not fetch code-mode docs via cluster transport: %s", exc)
+
     if devbox_url:
         try:
             resp = httpx.get(
@@ -181,13 +194,27 @@ def resolve_mcp_tool_descriptions(
 
 async def fetch_devbox_tool_descriptions(
     *,
-    devbox_url: str,
+    devbox_url: str | None = None,
     devbox_headers: dict[str, str] | None = None,
+    cluster_transport: Any | None = None,
     default_exec_yield_time_ms: int = 10_000,
     timeout_s: float = 2.0,
 ) -> tuple[str, str, str] | None:
     """Asynchronously fetch and render live code-mode docs from a running devbox."""
     try:
+        if cluster_transport is not None:
+            raw = await cluster_transport.fetch_code_mode_docs(
+                None, int(max(0.2, timeout_s) * 1000)
+            )
+            if raw is None:
+                return None
+            docs = ExtractedCodeModeDocs.from_dict(raw)
+            exec_desc, wait_desc = render_tool_descriptions(
+                docs, default_exec_yield_time_ms=default_exec_yield_time_ms
+            )
+            return exec_desc, wait_desc, docs.source_ref
+        if not devbox_url:
+            return None
         async with httpx.AsyncClient(timeout=timeout_s) as http:
             resp = await http.get(
                 f"{devbox_url.rstrip('/')}/code-mode-docs",

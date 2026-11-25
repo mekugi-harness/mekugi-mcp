@@ -9,6 +9,7 @@ services:
     environment:
       DEVBOX_WORKDIR: /workspace
       DEVBOX_SHELL: /bin/bash
+      DEVBOX_GRPC_ADDR: 0.0.0.0:50052
       DEVBOX_INTERNAL_TOKEN: ${DEVBOX_INTERNAL_TOKEN:-${JWT_SIGNING_KEY:?Set JWT_SIGNING_KEY or DEVBOX_INTERNAL_TOKEN}}
       MAX_CELL_YIELD_TIME_MS: ${MAX_CELL_YIELD_TIME_MS:-45000}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -26,7 +27,10 @@ services:
       devbox:
         condition: service_healthy
     environment:
-      DEVBOX_URL: http://devbox:8080
+      DEVBOX_URL: ${DEVBOX_URL:-grpc://devbox:50052}
+      DEFAULT_BOX: ${DEFAULT_BOX:-local}
+      DEVBOXES_JSON: ${DEVBOXES_JSON:-}
+      DEVBOXES_FILE: ${DEVBOXES_FILE:-}
       DEVBOX_INTERNAL_TOKEN: ${DEVBOX_INTERNAL_TOKEN:-${JWT_SIGNING_KEY:?Set JWT_SIGNING_KEY or DEVBOX_INTERNAL_TOKEN}}
       BASE_URL: ${BASE_URL:?Set BASE_URL to your public HTTPS tunnel URL (e.g. https://mcp.example.com)}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?Set GOOGLE_CLIENT_ID from Google Cloud Console}

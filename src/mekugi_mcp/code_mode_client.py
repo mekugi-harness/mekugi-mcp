@@ -144,10 +144,19 @@ class CodeModeHostClient:
         self._session_lock = asyncio.Lock()
         self._catalog_installed = False
         self._supports_catalog_revision = False
+        self._active_cells: set[str] = set()
 
     @property
     def session_id(self) -> str | None:
         return self._session_id
+
+    @property
+    def active_cell_count(self) -> int:
+        return len(self._active_cells)
+
+    @property
+    def active_shell_count(self) -> int:
+        return len(self.process_manager._sessions)
 
     async def start(self) -> None:
         """Connect to codex-code-mode-host and open a session."""
@@ -204,6 +213,8 @@ class CodeModeHostClient:
                                 self._session_id, event.notification.notification_id
                             )
                         )
+                    elif kind == "cell_closed":
+                        self._active_cells.discard(event.cell_closed.cell_id)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -295,7 +306,7 @@ class CodeModeHostClient:
                 )
             elif tool_name == "apply_patch":
                 patch_str = args if isinstance(args, str) else str(args.get("patch", ""))
-                result = apply_patch(patch_str, workdir=self.workdir)
+                result = await asyncio.to_thread(apply_patch, patch_str, workdir=self.workdir)
             else:
                 raise ValueError(f"Unknown nested tool: {tool_name}")
 
@@ -382,11 +393,16 @@ class CodeModeHostClient:
                     which = event.WhichOneof("event")
                     if which == "started":
                         self._catalog_installed = True
+                        if event.started.cell_id:
+                            self._active_cells.add(event.started.cell_id)
                     elif which == "outcome":
                         outcome = event.outcome
                 if outcome is None:
                     raise RuntimeError("codex-code-mode-host ended Execute stream without outcome")
-                return format_execution_outcome(outcome)
+                formatted = format_execution_outcome(outcome)
+                if formatted.status in ("completed", "terminated", "missing"):
+                    self._active_cells.discard(formatted.cell_id)
+                return formatted
             except grpc.aio.AioRpcError as exc:
                 if attempt == 0 and exc.code() in (
                     grpc.StatusCode.NOT_FOUND,
@@ -437,8 +453,12 @@ class CodeModeHostClient:
 
         state = resp.WhichOneof("state")
         if state == "missing_cell":
+            self._active_cells.discard(cell_id)
             return format_execution_outcome(resp.missing_cell, missing=True)
-        return format_execution_outcome(resp.live_cell, missing=False)
+        formatted = format_execution_outcome(resp.live_cell, missing=False)
+        if formatted.status in ("completed", "terminated", "missing"):
+            self._active_cells.discard(formatted.cell_id)
+        return formatted
 
     async def _close_streams_locked(self) -> None:
         for task in list(self._inflight_calls.values()):
@@ -460,6 +480,7 @@ class CodeModeHostClient:
         self._stub = None
         self._session_id = None
         self._catalog_installed = False
+        self._active_cells.clear()
 
     async def close(self) -> None:
         async with self._session_lock:

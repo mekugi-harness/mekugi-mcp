@@ -1,3 +1,24 @@
+FROM python:3.14-slim AS wheel-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock pyproject.toml README.md ./
+COPY proto ./proto
+COPY crates ./crates
+COPY src ./src
+
+RUN pip install --no-cache-dir "maturin>=1.7,<2.0" \
+    && maturin build --release --out /wheels
+
 FROM python:3.14-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -11,10 +32,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY pyproject.toml README.md ./
-COPY src ./src
+COPY --from=wheel-builder /wheels/*.whl /tmp/wheels/
 
-RUN pip install --no-cache-dir . && mkdir -p /data/oauth
+RUN pip install --no-cache-dir /tmp/wheels/*.whl \
+    && rm -rf /tmp/wheels \
+    && mkdir -p /data/oauth
 
 EXPOSE 8000
 
