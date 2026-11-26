@@ -54,8 +54,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown ubuntu:ubuntu /workspace \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=rust-builder /usr/local/bin/mekugi-devbox /usr/local/bin/mekugi-devbox
-
 # Pull prebuilt codex-code-mode-host and its SOURCE_REVISION from Mekugi GitHub Release.
 RUN set -eu; \
     mkdir -p /usr/local/share/mekugi; \
@@ -78,6 +76,7 @@ RUN --mount=type=secret,id=GITHUB_TOKEN \
     && sudo rm -rf /var/lib/apt/lists/*
 
 USER root
+COPY --from=rust-builder /usr/local/bin/mekugi-devbox /usr/local/bin/mekugi-devbox
 RUN set -eu; \
     rev="$(tr -d '[:space:]' < /usr/local/share/mekugi/SOURCE_REVISION)"; \
     base="https://raw.githubusercontent.com/${MEKUGI_REPO}/${rev}"; \
