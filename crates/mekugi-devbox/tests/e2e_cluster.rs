@@ -204,6 +204,45 @@ text(p + "\n" + r);"#
     assert!(default_out.text.contains("rust-native"));
     assert!(default_out.text.contains(dir_a.to_str().unwrap()));
 
+    // 4b. Shell-free argv + stdin + env + mutual-exclusion validation over V8
+    let argv_out = cluster
+        .exec(
+            None,
+            r#"
+const raw = await tools.exec_command({
+  argv: ["printf", "%s|%s", "$(echo PWNED)", "$HOME `uname`"],
+});
+const piped = await tools.exec_command({
+  argv: ["cat"],
+  stdin: "hello-from-stdin\n",
+});
+const envOut = await tools.exec_command({
+  argv: ["printenv", "E2E_CUSTOM_ENV"],
+  env: { E2E_CUSTOM_ENV: "value-42" },
+});
+let bothErr = "";
+try {
+  await tools.exec_command({ cmd: "echo a", argv: ["echo", "a"] });
+} catch (e) {
+  bothErr = String(e);
+}
+text([raw, piped, envOut, "ERR:" + bothErr].join("\n---\n"));
+"#
+            .into(),
+            10_000,
+            10_000,
+        )
+        .await
+        .unwrap();
+    assert!(
+        argv_out.text.contains("$(echo PWNED)|$HOME `uname`"),
+        "argv_out={}",
+        argv_out.text
+    );
+    assert!(argv_out.text.contains("hello-from-stdin"), "argv_out={}", argv_out.text);
+    assert!(argv_out.text.contains("value-42"), "argv_out={}", argv_out.text);
+    assert!(argv_out.text.contains("not both"), "argv_out={}", argv_out.text);
+
     // 5. Explicit box="beta" yield + stateless wait without passing box
     let yielded = cluster
         .exec(
