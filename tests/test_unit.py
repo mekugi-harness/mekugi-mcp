@@ -12,8 +12,31 @@ from fastmcp import Client
 from mekugi_mcp._transport import format_cell_id, parse_cell_route
 
 from mekugi_mcp.auth import build_google_auth_provider, enforce_allowed_email, parse_allowed_emails
+from mekugi_mcp.code_mode_docs import (
+    EXEC_TOOL_DESCRIPTION,
+    ExtractedCodeModeDocs,
+    render_tool_descriptions,
+)
 from mekugi_mcp.schema_sanitizer import FORBIDDEN_SCHEMA_KEYS, sanitize_gemini_schema
 from mekugi_mcp.server import create_mcp_server
+
+
+def test_exec_tool_docs_include_argv_stdin_env() -> None:
+    for desc in (
+        EXEC_TOOL_DESCRIPTION,
+        render_tool_descriptions(
+            ExtractedCodeModeDocs(
+                source_repo="mekugi-harness/mekugi",
+                source_ref="test-ref",
+                exec_description_template="Run JS {{ default_exec_yield_time_ms }} {{ image_helper }}",
+                wait_description_template="Wait on cell",
+                image_helper_description="img",
+            )
+        )[0],
+    ):
+        assert "argv: [string, ...string[]]" in desc
+        assert "stdin?: string" in desc
+        assert "env?: Record<string, string>" in desc
 
 
 def test_sanitize_gemini_schema_strips_forbidden_keys() -> None:

@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::apply_patch::apply_patch;
 use crate::pragma::parse_exec_source;
-use crate::pty_manager::ProcessManager;
+use crate::pty_manager::{ExecCommandMode, ExecCommandOptions, ProcessManager};
 
 #[allow(clippy::result_large_err)]
 pub mod cm_pb {
@@ -156,15 +156,30 @@ fn build_nested_tool_definitions() -> Vec<cm_pb::ToolDefinition> {
     let exec_schema = json!({
         "type": "object",
         "properties": {
-            "cmd": {"type": "string", "description": "Shell command to execute inside the devbox."},
+            "cmd": {"type": "string", "description": "Shell command to execute inside the devbox (mutually exclusive with argv)."},
+            "argv": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": "Direct executable and arguments spawned without a shell (mutually exclusive with cmd; argv[0] resolves via PATH)."
+            },
+            "stdin": {"type": "string", "description": "Optional raw UTF-8 bytes written to child stdin before closing EOF immediately."},
+            "env": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": "Optional environment variable overrides for the spawned process."
+            },
             "workdir": {"type": "string", "description": "Optional working directory (defaults to /workspace)."},
-            "shell": {"type": "string", "description": "Optional shell executable (defaults to /bin/bash)."},
-            "login": {"type": "boolean", "description": "Run shell with -l login semantics (default true)."},
+            "shell": {"type": "string", "description": "Optional shell executable for cmd mode (defaults to /bin/bash)."},
+            "login": {"type": "boolean", "description": "Run shell with -l login semantics in cmd mode (default true)."},
             "tty": {"type": "boolean", "description": "Allocate a PTY for interactive sessions (default false)."},
             "yield_time_ms": {"type": "number", "description": "How long to wait in ms before returning a running session ID (default 10000)."},
             "max_output_tokens": {"type": "number", "description": "Maximum output tokens to return (default 10000)."}
         },
-        "required": ["cmd"]
+        "oneOf": [
+            {"required": ["cmd"]},
+            {"required": ["argv"]}
+        ]
     });
     let write_stdin_schema = json!({
         "type": "object",
@@ -184,7 +199,7 @@ fn build_nested_tool_definitions() -> Vec<cm_pb::ToolDefinition> {
                 name: "exec_command".into(),
                 namespace: None,
             }),
-            description: "Runs a command in a shell or PTY inside the devbox, returning output or a session ID.".into(),
+            description: "Runs a command in a shell (cmd) or directly without a shell (argv, with optional stdin and env) inside the devbox, returning output or a session ID.".into(),
             kind: cm_pb::ToolKind::Function as i32,
             input_schema_json: Some(serde_json::to_vec(&exec_schema).unwrap_or_default()),
             output_schema_json: None,
@@ -884,28 +899,13 @@ async fn handle_nested_tool_call(
 
     let result: Result<String, String> = match tool_name {
         "exec_command" => {
-            let Some(cmd) = args.get("cmd").and_then(|v| v.as_str()) else {
-                complete_failed(
-                    channel,
-                    call.session_id,
-                    call.invocation_id,
-                    "exec_command requires an object with 'cmd'".into(),
-                )
-                .await;
-                return;
-            };
-            pm.exec_command(
-                cmd,
-                args.get("workdir").and_then(|v| v.as_str()),
-                args.get("shell").and_then(|v| v.as_str()),
-                args.get("login").and_then(|v| v.as_bool()).unwrap_or(true),
-                args.get("tty").and_then(|v| v.as_bool()).unwrap_or(false),
-                args.get("yield_time_ms").and_then(|v| v.as_u64()),
-                args.get("max_output_tokens")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize),
-            )
-            .await
+            match parse_exec_command_args(&args) {
+                Ok(options) => pm.exec_command(options).await,
+                Err(msg) => {
+                    complete_failed(channel, call.session_id, call.invocation_id, msg).await;
+                    return;
+                }
+            }
         }
         "write_stdin" => {
             let Some(sid) = args.get("session_id").and_then(|v| v.as_i64()) else {
@@ -988,4 +988,210 @@ async fn complete_failed(channel: Channel, session_id: String, invocation_id: St
             )),
         })
         .await;
+}
+
+pub(crate) fn parse_exec_command_args(args: &serde_json::Value) -> Result<ExecCommandOptions, String> {
+    let Some(obj) = args.as_object() else {
+        return Err("exec_command requires an object with either 'cmd' or 'argv'".into());
+    };
+
+    let cmd_val = obj.get("cmd").filter(|v| !v.is_null());
+    let argv_val = obj.get("argv").filter(|v| !v.is_null());
+
+    let mode = match (cmd_val, argv_val) {
+        (Some(_), Some(_)) => {
+            return Err("exec_command accepts either 'cmd' or 'argv', not both".into());
+        }
+        (None, None) => {
+            return Err("exec_command requires either 'cmd' or 'argv'".into());
+        }
+        (Some(cmd_v), None) => {
+            let Some(cmd) = cmd_v.as_str() else {
+                return Err("exec_command 'cmd' must be a string".into());
+            };
+            let shell = match obj.get("shell").filter(|v| !v.is_null()) {
+                None => None,
+                Some(v) => Some(
+                    v.as_str()
+                        .ok_or_else(|| "exec_command 'shell' must be a string".to_owned())?
+                        .to_owned(),
+                ),
+            };
+            let login = obj.get("login").and_then(|v| v.as_bool()).unwrap_or(true);
+            ExecCommandMode::Shell {
+                cmd: cmd.to_owned(),
+                shell,
+                login,
+            }
+        }
+        (None, Some(argv_v)) => {
+            let Some(arr) = argv_v.as_array() else {
+                return Err("exec_command 'argv' must be a non-empty array of strings".into());
+            };
+            if arr.is_empty() {
+                return Err("exec_command 'argv' must be a non-empty array of strings".into());
+            }
+            let mut items = Vec::with_capacity(arr.len());
+            for item in arr {
+                let Some(s) = item.as_str() else {
+                    return Err("exec_command 'argv' elements must all be strings".into());
+                };
+                items.push(s.to_owned());
+            }
+            let program = items.remove(0);
+            if program.is_empty() {
+                return Err("exec_command 'argv[0]' must be a non-empty executable name".into());
+            }
+            ExecCommandMode::Argv {
+                program,
+                args: items,
+            }
+        }
+    };
+
+    let stdin = match obj.get("stdin").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| "exec_command 'stdin' must be a string".to_owned())?
+                .to_owned(),
+        ),
+    };
+
+    let env = match obj.get("env").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => {
+            let Some(map) = v.as_object() else {
+                return Err(
+                    "exec_command 'env' must be an object mapping strings to strings".into(),
+                );
+            };
+            let mut out = HashMap::with_capacity(map.len());
+            for (k, val) in map {
+                let Some(s) = val.as_str() else {
+                    return Err(format!("exec_command 'env.{k}' must be a string"));
+                };
+                out.insert(k.clone(), s.to_owned());
+            }
+            Some(out)
+        }
+    };
+
+    let workdir = match obj.get("workdir").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| "exec_command 'workdir' must be a string".to_owned())?
+                .to_owned(),
+        ),
+    };
+
+    Ok(ExecCommandOptions {
+        mode,
+        workdir,
+        stdin,
+        env,
+        tty: obj.get("tty").and_then(|v| v.as_bool()).unwrap_or(false),
+        yield_time_ms: obj.get("yield_time_ms").and_then(|v| v.as_u64()),
+        max_output_tokens: obj
+            .get("max_output_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_exec_command_cmd_defaults() {
+        let opts = parse_exec_command_args(&json!({"cmd": "echo hi"})).unwrap();
+        assert_eq!(
+            opts.mode,
+            ExecCommandMode::Shell {
+                cmd: "echo hi".into(),
+                shell: None,
+                login: true,
+            }
+        );
+        assert!(!opts.tty);
+        assert!(opts.stdin.is_none());
+        assert!(opts.env.is_none());
+    }
+
+    #[test]
+    fn test_parse_exec_command_argv_full() {
+        let opts = parse_exec_command_args(&json!({
+            "argv": ["python3", "-"],
+            "stdin": "print(1)\n",
+            "env": {"FOO": "bar"},
+            "workdir": "/tmp",
+            "yield_time_ms": 2500,
+            "max_output_tokens": 500
+        }))
+        .unwrap();
+        assert_eq!(
+            opts.mode,
+            ExecCommandMode::Argv {
+                program: "python3".into(),
+                args: vec!["-".into()],
+            }
+        );
+        assert_eq!(opts.stdin.as_deref(), Some("print(1)\n"));
+        assert_eq!(
+            opts.env,
+            Some(HashMap::from([("FOO".into(), "bar".into())]))
+        );
+        assert_eq!(opts.workdir.as_deref(), Some("/tmp"));
+        assert_eq!(opts.yield_time_ms, Some(2500));
+        assert_eq!(opts.max_output_tokens, Some(500));
+    }
+
+    #[test]
+    fn test_parse_exec_command_validation_errors() {
+        let err_both = parse_exec_command_args(&json!({
+            "cmd": "echo hi",
+            "argv": ["echo", "hi"]
+        }))
+        .unwrap_err();
+        assert!(err_both.contains("not both"), "err={err_both}");
+
+        let err_neither = parse_exec_command_args(&json!({})).unwrap_err();
+        assert!(err_neither.contains("requires either"), "err={err_neither}");
+
+        let err_empty = parse_exec_command_args(&json!({"argv": []})).unwrap_err();
+        assert!(err_empty.contains("non-empty array"), "err={err_empty}");
+
+        let err_non_str = parse_exec_command_args(&json!({"argv": ["echo", 123]})).unwrap_err();
+        assert!(err_non_str.contains("all be strings"), "err={err_non_str}");
+
+        let err_empty_prog = parse_exec_command_args(&json!({"argv": [""]})).unwrap_err();
+        assert!(err_empty_prog.contains("argv[0]"), "err={err_empty_prog}");
+
+        let err_stdin = parse_exec_command_args(&json!({"argv": ["cat"], "stdin": 42})).unwrap_err();
+        assert!(err_stdin.contains("'stdin'"), "err={err_stdin}");
+
+        let err_env =
+            parse_exec_command_args(&json!({"argv": ["env"], "env": {"A": 1}})).unwrap_err();
+        assert!(err_env.contains("env.A"), "err={err_env}");
+
+        let err_non_obj = parse_exec_command_args(&json!("echo hi")).unwrap_err();
+        assert!(err_non_obj.contains("requires an object"), "err={err_non_obj}");
+    }
+
+    #[test]
+    fn test_nested_exec_command_schema_supports_argv_stdin_env() {
+        let defs = build_nested_tool_definitions();
+        let exec_def = defs.iter().find(|d| d.name == "exec_command").unwrap();
+        let schema: serde_json::Value =
+            serde_json::from_slice(exec_def.input_schema_json.as_ref().unwrap()).unwrap();
+        assert!(schema.get("required").is_none());
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("cmd"));
+        assert!(props.contains_key("argv"));
+        assert!(props.contains_key("stdin"));
+        assert!(props.contains_key("env"));
+        assert_eq!(schema["oneOf"].as_array().unwrap().len(), 2);
+    }
 }

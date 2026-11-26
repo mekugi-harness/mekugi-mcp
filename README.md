@@ -138,7 +138,7 @@ docker compose -f docker-compose.yml -f docker/devbox/compose.plane.yml \
 
 ## Exposed MCP Tools
 
-- **`exec(code, box=None, yield_time_ms=10000, max_output_tokens=10000)`**: Runs raw JavaScript in Mekugi's V8 isolate (`codex-code-mode-host`) on the target devbox (defaults to `DEFAULT_BOX`), with nested `tools.exec_command`, `tools.write_stdin`, and `tools.apply_patch`, plus `// @exec: {...}` pragmas and `text()`/`store()`/`load()`/`exit()`/`yield_control()`.
+- **`exec(code, box=None, yield_time_ms=10000, max_output_tokens=10000)`**: Runs raw JavaScript in Mekugi's V8 isolate (`codex-code-mode-host`) on the target devbox (defaults to `DEFAULT_BOX`), with nested `tools.exec_command` (supporting both shell `cmd` and shell-free `argv` modes, plus optional `stdin` and `env`), `tools.write_stdin`, and `tools.apply_patch`, plus `// @exec: {...}` pragmas and `text()`/`store()`/`load()`/`exit()`/`yield_control()`.
 - **`wait(cell_id, box=None, yield_time_ms=10000, max_output_tokens=10000, terminate=false)`**: Polls or terminates a yielded `exec` cell. Namespaced `<box>:<cell_id>` IDs route automatically.
 - **`list_boxes()`**: Lists all configured devboxes with default flag, transport, live status/latency, host metadata (`hostname`, `os`, `arch`, `workdir`), labels, description, and active cell/shell counts.
 

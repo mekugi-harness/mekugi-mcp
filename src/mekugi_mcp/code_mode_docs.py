@@ -15,7 +15,8 @@ DEFAULT_CELL_YIELD_TIME_MS = 10_000
 MAX_CELL_YIELD_TIME_MS = 45_000
 
 NESTED_TOOLS_SECTION = """Nested tools available on `tools`:
-- `await tools.exec_command({ cmd: string, workdir?: string, shell?: string, login?: boolean, tty?: boolean, yield_time_ms?: number, max_output_tokens?: number }): Promise<string>`
+- `await tools.exec_command({ cmd: string, workdir?: string, env?: Record<string, string>, shell?: string, login?: boolean, stdin?: string, tty?: boolean, yield_time_ms?: number, max_output_tokens?: number } | { argv: [string, ...string[]], workdir?: string, env?: Record<string, string>, stdin?: string, tty?: boolean, yield_time_ms?: number, max_output_tokens?: number }): Promise<string>`
+  (`cmd` and `argv` are mutually exclusive; `argv` spawns directly without a shell, `stdin` writes raw UTF-8 bytes and closes EOF immediately)
 - `await tools.write_stdin({ session_id: number, chars?: string, yield_time_ms?: number, max_output_tokens?: number }): Promise<string>`
 - `await tools.apply_patch(patch: string): Promise<string>` (Codex `*** Begin Patch` ... `*** End Patch` format)"""
 
@@ -36,7 +37,8 @@ WAIT_MCP_ADDENDUM = (
 EXEC_TOOL_DESCRIPTION = """Run JavaScript code in Mekugi's V8 code-mode isolate to orchestrate devbox tool calls.
 - Pass raw JavaScript in `code` (no Markdown fences). Each call runs as an async module in a fresh V8 isolate without Node, fs, network, or console.
 - Call nested tools on the global `tools` object:
-  - `await tools.exec_command({ cmd: string, workdir?: string, shell?: string, login?: boolean, tty?: boolean, yield_time_ms?: number, max_output_tokens?: number }): Promise<string>`
+  - `await tools.exec_command({ cmd: string, workdir?: string, env?: Record<string, string>, shell?: string, login?: boolean, stdin?: string, tty?: boolean, yield_time_ms?: number, max_output_tokens?: number } | { argv: [string, ...string[]], workdir?: string, env?: Record<string, string>, stdin?: string, tty?: boolean, yield_time_ms?: number, max_output_tokens?: number }): Promise<string>`
+    (`cmd` and `argv` are mutually exclusive; `argv` spawns directly without a shell, `stdin` writes raw UTF-8 bytes and closes EOF immediately)
   - `await tools.write_stdin({ session_id: number, chars?: string, yield_time_ms?: number, max_output_tokens?: number }): Promise<string>`
   - `await tools.apply_patch(patch: string): Promise<string>` (Codex `*** Begin Patch` ... `*** End Patch` format)
 - Optional first-line pragma: `// @exec: {"yield_time_ms": 10000, "max_output_tokens": 10000}`.
