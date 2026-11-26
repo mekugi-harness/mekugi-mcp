@@ -147,8 +147,11 @@ impl ProcessManager {
     }
 
     pub async fn exec_command(&self, options: ExecCommandOptions) -> Result<String, String> {
+        if options.tty && options.stdin.is_some() {
+            return Err("exec_command 'stdin' is not supported when 'tty' is true".into());
+        }
         let cwd = self.resolve_workdir(options.workdir.as_deref());
-        let (program, args): (&str, Vec<String>) = match &options.mode {
+        let (program, args): (String, Vec<String>) = match &options.mode {
             ExecCommandMode::Shell { cmd, shell, login } => {
                 let shell_bin = shell
                     .as_deref()
@@ -160,14 +163,23 @@ impl ProcessManager {
                 } else {
                     vec!["-c".to_owned(), cmd.clone()]
                 };
-                (shell_bin, args)
+                (shell_bin.to_owned(), args)
             }
-            ExecCommandMode::Argv { program, args } => (program.as_str(), args.clone()),
+            ExecCommandMode::Argv { program, args } => {
+                let resolved = if !Path::new(program).is_absolute()
+                    && (program.contains('/') || program.contains(std::path::MAIN_SEPARATOR))
+                {
+                    cwd.join(program).display().to_string()
+                } else {
+                    program.clone()
+                };
+                (resolved, args.clone())
+            }
         };
         let env = self.build_env(options.env.as_ref());
         let spawned = if options.tty {
             spawn_pty_process(
-                program,
+                &program,
                 &args,
                 &cwd,
                 &env,
@@ -178,7 +190,7 @@ impl ProcessManager {
             .await
             .map_err(|e| format!("Failed to spawn PTY command: {e}"))?
         } else {
-            spawn_pipe_process(program, &args, &cwd, &env, &None, &[])
+            spawn_pipe_process(&program, &args, &cwd, &env, &None, &[])
                 .await
                 .map_err(|e| format!("Failed to spawn command: {e}"))?
         };
@@ -539,6 +551,43 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("Failed to spawn command"), "err={err}");
+        mgr.close_all().await;
+    }
+
+    #[tokio::test]
+    async fn test_exec_tty_and_stdin_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ProcessManager::new(tmp.path().to_path_buf(), "/bin/bash".into());
+        let mut opts = argv_opts("cat", &[]);
+        opts.tty = true;
+        opts.stdin = Some("hello\n".into());
+        let err = mgr.exec_command(opts).await.unwrap_err();
+        assert!(err.contains("tty"), "err={err}");
+        mgr.close_all().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_exec_argv_relative_path_works_in_pipe_and_tty() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let script = bin_dir.join("hello.sh");
+        std::fs::write(&script, "#!/bin/sh\necho rel-tool-ok\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mgr = ProcessManager::new(tmp.path().to_path_buf(), "/bin/bash".into());
+        let pipe_out = mgr.exec_command(argv_opts("bin/hello.sh", &[])).await.unwrap();
+        assert!(pipe_out.contains("Process exited with code 0"), "out={pipe_out}");
+        assert!(pipe_out.contains("rel-tool-ok"), "out={pipe_out}");
+
+        let mut tty_opts = argv_opts("bin/hello.sh", &[]);
+        tty_opts.tty = true;
+        let tty_out = mgr.exec_command(tty_opts).await.unwrap();
+        assert!(tty_out.contains("Process exited with code 0"), "out={tty_out}");
+        assert!(tty_out.contains("rel-tool-ok"), "out={tty_out}");
         mgr.close_all().await;
     }
 }

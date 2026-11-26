@@ -1086,12 +1086,17 @@ pub(crate) fn parse_exec_command_args(args: &serde_json::Value) -> Result<ExecCo
         ),
     };
 
+    let tty = obj.get("tty").and_then(|v| v.as_bool()).unwrap_or(false);
+    if tty && stdin.is_some() {
+        return Err("exec_command 'stdin' is not supported when 'tty' is true".into());
+    }
+
     Ok(ExecCommandOptions {
         mode,
         workdir,
         stdin,
         env,
-        tty: obj.get("tty").and_then(|v| v.as_bool()).unwrap_or(false),
+        tty,
         yield_time_ms: obj.get("yield_time_ms").and_then(|v| v.as_u64()),
         max_output_tokens: obj
             .get("max_output_tokens")
@@ -1171,6 +1176,11 @@ mod tests {
 
         let err_stdin = parse_exec_command_args(&json!({"argv": ["cat"], "stdin": 42})).unwrap_err();
         assert!(err_stdin.contains("'stdin'"), "err={err_stdin}");
+
+        let err_tty_stdin =
+            parse_exec_command_args(&json!({"argv": ["cat"], "stdin": "hi", "tty": true}))
+                .unwrap_err();
+        assert!(err_tty_stdin.contains("tty"), "err={err_tty_stdin}");
 
         let err_env =
             parse_exec_command_args(&json!({"argv": ["env"], "env": {"A": 1}})).unwrap_err();
