@@ -293,15 +293,22 @@ impl ProcessManager {
             reaper_task,
         });
 
-        if let Some(stdin_str) = options.stdin {
-            if !stdin_str.is_empty() {
-                let tx = managed.handle.writer_sender();
-                let _ = tx.send(stdin_str.into_bytes()).await;
-            }
-            managed.handle.close_stdin();
-        }
-
         self.sessions.lock().await.insert(session_id, managed.clone());
+
+        if let Some(stdin_str) = options.stdin {
+            if stdin_str.is_empty() {
+                managed.handle.close_stdin();
+            } else {
+                let tx = managed.handle.writer_sender();
+                // Drop ProcessHandle's sender copy first so tx is the sole remaining sender
+                // and EOF is delivered immediately after the payload is queued.
+                managed.handle.close_stdin();
+                let bytes = stdin_str.into_bytes();
+                tokio::spawn(async move {
+                    let _ = tx.send(bytes).await;
+                });
+            }
+        }
 
         let wait_ms = options
             .yield_time_ms
@@ -642,5 +649,44 @@ mod tests {
         assert!(!env.contains_key("DEVBOX_INTERNAL_TOKEN"));
         assert!(!env.contains_key("NOTIFY_SOCKET"));
         assert!(!env.contains_key("WATCHDOG_USEC"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_argv_large_stdin_fast_exit_does_not_block() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ProcessManager::new(tmp.path().to_path_buf(), "/bin/bash".into());
+        let mut payload = String::with_capacity(260 * 1024);
+        payload.push_str("first-line-ok\n");
+        for _ in 0..4096 {
+            payload.push_str("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n");
+        }
+        let mut opts = argv_opts("head", &["-n", "1"]);
+        opts.stdin = Some(payload);
+        opts.yield_time_ms = Some(3_000);
+
+        let out = mgr.exec_command(opts).await.unwrap();
+        assert!(out.contains("Process exited with code 0"), "out={out}");
+        assert!(out.contains("first-line-ok"), "out={out}");
+        mgr.close_all().await;
+    }
+
+    #[tokio::test]
+    async fn test_exec_argv_large_stdin_unconsumed_respects_yield_time() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ProcessManager::new(tmp.path().to_path_buf(), "/bin/bash".into());
+        let payload = "x".repeat(256 * 1024);
+        let mut opts = argv_opts("sleep", &["5"]);
+        opts.stdin = Some(payload);
+        opts.yield_time_ms = Some(200);
+
+        let started = Instant::now();
+        let out = mgr.exec_command(opts).await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "exec_command blocked past yield_time_ms: {:?}",
+            started.elapsed()
+        );
+        assert!(out.contains("Process running with session ID"), "out={out}");
+        mgr.close_all().await;
     }
 }
