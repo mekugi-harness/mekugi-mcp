@@ -17,6 +17,25 @@ const CHARS_PER_TOKEN: usize = 4;
 const MAX_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 const EXITED_SESSION_TTL: Duration = Duration::from_secs(600);
 
+/// Daemon-private configuration and systemd runtime variables that must not
+/// leak into agent child shells (e.g. to prevent exposing DEVBOX_INTERNAL_TOKEN
+/// or shadowing docker compose .env interpolation on the host).
+const SCRUBBED_DAEMON_ENV_VARS: &[&str] = &[
+    "DEVBOX_INTERNAL_TOKEN",
+    "DEVBOX_GRPC_ADDR",
+    "DEVBOX_HOST",
+    "DEVBOX_PORT",
+    "DEVBOX_WORKDIR",
+    "DEVBOX_SHELL",
+    "CODE_MODE_HOST_BIN",
+    "CODE_MODE_HOST_TARGET",
+    "CODE_MODE_DOCS_PATH",
+    "MAX_CELL_YIELD_TIME_MS",
+    "NOTIFY_SOCKET",
+    "WATCHDOG_USEC",
+    "WATCHDOG_PID",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecCommandMode {
     Shell {
@@ -132,11 +151,22 @@ impl ProcessManager {
     }
 
     fn build_env(&self, extra_env: Option<&HashMap<String, String>>) -> HashMap<String, String> {
-        let mut env: HashMap<String, String> = std::env::vars().collect();
-        env.insert(
-            "SESSION_TMP".into(),
-            self.session_tmp.display().to_string(),
-        );
+        Self::build_env_from(std::env::vars(), &self.session_tmp, extra_env)
+    }
+
+    fn build_env_from<I>(
+        base_vars: I,
+        session_tmp: &Path,
+        extra_env: Option<&HashMap<String, String>>,
+    ) -> HashMap<String, String>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        let mut env: HashMap<String, String> = base_vars.into_iter().collect();
+        for key in SCRUBBED_DAEMON_ENV_VARS {
+            env.remove(*key);
+        }
+        env.insert("SESSION_TMP".into(), session_tmp.display().to_string());
         env.entry("TERM".into()).or_insert_with(|| "xterm-256color".into());
         if let Some(extra) = extra_env {
             for (k, v) in extra {
@@ -589,5 +619,28 @@ mod tests {
         assert!(tty_out.contains("Process exited with code 0"), "out={tty_out}");
         assert!(tty_out.contains("rel-tool-ok"), "out={tty_out}");
         mgr.close_all().await;
+    }
+
+    #[test]
+    fn test_build_env_scrubs_daemon_vars_and_allows_explicit_override() {
+        let base = vec![
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+            ("DEVBOX_INTERNAL_TOKEN".to_owned(), "super-secret".to_owned()),
+            ("DEVBOX_PORT".to_owned(), "8080".to_owned()),
+            ("NOTIFY_SOCKET".to_owned(), "/run/systemd/notify".to_owned()),
+            ("WATCHDOG_USEC".to_owned(), "30000000".to_owned()),
+        ];
+        let mut extra = HashMap::new();
+        extra.insert("DEVBOX_PORT".to_owned(), "9090".to_owned());
+        extra.insert("CUSTOM_VAR".to_owned(), "ok".to_owned());
+
+        let env = ProcessManager::build_env_from(base, Path::new("/tmp/session"), Some(&extra));
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin:/bin"));
+        assert_eq!(env.get("SESSION_TMP").map(String::as_str), Some("/tmp/session"));
+        assert_eq!(env.get("CUSTOM_VAR").map(String::as_str), Some("ok"));
+        assert_eq!(env.get("DEVBOX_PORT").map(String::as_str), Some("9090"));
+        assert!(!env.contains_key("DEVBOX_INTERNAL_TOKEN"));
+        assert!(!env.contains_key("NOTIFY_SOCKET"));
+        assert!(!env.contains_key("WATCHDOG_USEC"));
     }
 }
